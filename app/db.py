@@ -1,6 +1,6 @@
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .catalog import Catalog
@@ -18,9 +18,8 @@ CREATE TABLE IF NOT EXISTS orders (
     track TEXT DEFAULT '',
     shipped_at TEXT DEFAULT '',
     message_id INTEGER,
-    source TEXT NOT NULL DEFAULT 'tilda',        -- tilda | chat
-    payment TEXT DEFAULT '',                     -- способ оплаты: долями, переводом…
-    note TEXT DEFAULT ''
+    payment TEXT DEFAULT '',                     -- способ оплаты: долями, картой…
+    dane_paid_at TEXT DEFAULT ''                 -- когда отдал Дане его долю (реакция на карточку)
 );
 CREATE TABLE IF NOT EXISTS items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -38,12 +37,6 @@ CREATE TABLE IF NOT EXISTS items (
     brand_profit REAL NOT NULL, -- прибыль бренда = выручка − эквайринг − себестоимость
     dane REAL NOT NULL,         -- доля Дани (DANE_SHARE_PERCENT от прибыли бренда)
     profit REAL NOT NULL        -- моя доля
-);
-CREATE TABLE IF NOT EXISTS payouts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    created_at TEXT NOT NULL,
-    amount REAL NOT NULL,
-    note TEXT DEFAULT ''
 );
 """
 
@@ -81,8 +74,7 @@ class DB:
 
     def _migrate(self) -> None:
         have = {r["name"] for r in self.conn.execute("PRAGMA table_info(orders)")}
-        for column, ddl in (("source", "TEXT NOT NULL DEFAULT 'tilda'"), ("payment", "TEXT DEFAULT ''"),
-                            ("note", "TEXT DEFAULT ''")):
+        for column, ddl in (("payment", "TEXT DEFAULT ''"), ("dane_paid_at", "TEXT DEFAULT ''")):
             if column not in have:
                 self.conn.execute(f"ALTER TABLE orders ADD COLUMN {column} {ddl}")
         self.conn.commit()
@@ -91,8 +83,7 @@ class DB:
         return self.conn.execute("SELECT 1 FROM orders WHERE order_id=?", (order_id,)).fetchone() is not None
 
     def save_order(self, order: Order, catalog: Catalog, acquiring_percent: float,
-                   dane_share_percent: float = 50, source: str = "tilda", status: str = "new",
-                   note: str = "") -> int:
+                   dane_share_percent: float = 50) -> int:
         """Сохраняет заказ и считает деньги по каждой позиции. Возвращает pk заказа.
 
         Комиссия берётся по способу оплаты (долями, СБП, перевод…), если он распознан,
@@ -103,13 +94,11 @@ class DB:
         with self.conn:
             cur = self.conn.execute(
                 """INSERT INTO orders (order_id, created_at, name, phone, email, address, delivery,
-                   delivery_price, promocode, discount, total, comment, source, payment, note,
-                   status, shipped_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   delivery_price, promocode, discount, total, comment, payment)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (order.order_id, now(), order.name, order.phone, order.email, order.address,
                  order.delivery, order.delivery_price, order.promocode, order.discount,
-                 order.total, order.comment, source, payment, note,
-                 status, now() if status == "shipped" else ""),
+                 order.total, order.comment, payment),
             )
             pk = cur.lastrowid
             gross = sum(i.amount for i in order.items) or 1
@@ -158,16 +147,9 @@ class DB:
                 self.conn.execute("UPDATE orders SET status=?, shipped_at=? WHERE id=?",
                                   (status, shipped_at, pk))
 
-    def recent_tilda_order(self, product: str, size: str, hours: int = 72) -> sqlite3.Row | None:
-        """Заказ с Тильды с тем же товаром (и размером) за последние часы — чтобы не задвоить продажу."""
-        since = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M")
-        return self.conn.execute(
-            """SELECT o.* FROM orders o JOIN items i ON i.order_pk = o.id
-               WHERE o.source = 'tilda' AND o.status != 'cancelled' AND o.created_at >= ?
-                 AND i.product = ? AND (? = '' OR i.size = ?)
-               ORDER BY o.created_at DESC LIMIT 1""",
-            (since, product, size, size),
-        ).fetchone()
+    def set_dane_paid(self, pk: int, paid: bool) -> None:
+        with self.conn:
+            self.conn.execute("UPDATE orders SET dane_paid_at=? WHERE id=?", (now() if paid else "", pk))
 
     def not_shipped(self) -> list[sqlite3.Row]:
         return self.conn.execute(
@@ -179,21 +161,21 @@ class DB:
     def all_items(self) -> list[sqlite3.Row]:
         return self.conn.execute(
             """SELECT i.*, o.order_id, o.created_at, o.name AS client, o.status, o.track, o.shipped_at,
-                      o.source, o.payment
+                      o.payment, o.dane_paid_at
                FROM items i JOIN orders o ON o.id = i.order_pk ORDER BY o.created_at, o.id, i.id"""
         ).fetchall()
 
-    def delete_payout(self, payout_id: int) -> None:
-        with self.conn:
-            self.conn.execute("DELETE FROM payouts WHERE id=?", (payout_id,))
-
-    def add_payout(self, amount: float, note: str = "") -> int:
-        with self.conn:
-            return self.conn.execute("INSERT INTO payouts (created_at, amount, note) VALUES (?,?,?)",
-                                     (now(), amount, note)).lastrowid
-
-    def payouts(self) -> list[sqlite3.Row]:
-        return self.conn.execute("SELECT * FROM payouts ORDER BY id").fetchall()
+    def dane_by_order(self) -> list[sqlite3.Row]:
+        """Доля Дани по каждому заказу и отметка, отдана ли (лист «Дане»)."""
+        return self.conn.execute(
+            """SELECT o.order_id, o.created_at, o.name, o.status, o.dane_paid_at,
+                      GROUP_CONCAT(i.product || CASE WHEN i.size != '' THEN ' ' || i.size ELSE '' END, ', ')
+                          AS products,
+                      SUM(i.dane) AS dane
+               FROM orders o JOIN items i ON i.order_pk = o.id
+               WHERE o.status != 'cancelled'
+               GROUP BY o.id ORDER BY o.dane_paid_at != '', o.created_at"""
+        ).fetchall()
 
     def size_matrix(self, outerwear_only: bool = True) -> dict[str, dict[str, int]]:
         """{товар: {размер: продано шт.}} без отменённых заказов."""
@@ -218,7 +200,9 @@ class DB:
         ).fetchone()
         status = dict(self.conn.execute(
             "SELECT status, COUNT(*) FROM orders GROUP BY status").fetchall())
-        paid = self.conn.execute("SELECT COALESCE(SUM(amount),0) FROM payouts").fetchone()[0]
+        paid = self.conn.execute(
+            """SELECT COALESCE(SUM(i.dane),0) FROM orders o JOIN items i ON i.order_pk = o.id
+               WHERE o.status != 'cancelled' AND o.dane_paid_at != ''""").fetchone()[0]
         return Totals(
             orders=money["orders"], revenue=money["revenue"], fee=money["fee"], dane=money["dane"],
             cost=money["cost"], brand_profit=money["brand_profit"], profit=money["profit"], paid_to_dane=paid,

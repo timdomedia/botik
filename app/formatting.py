@@ -1,10 +1,10 @@
-"""Тексты сообщений в чат — коротко, как пишем в беседе: «шуба L долями — 25 000», «Дане: 9 650»."""
+"""Тексты сообщений в чат — коротко, как в беседе: «Шуба L долями — 25 000», «Дане: 9 650»."""
 from html import escape
 
 from .catalog import Catalog
 from .db import Totals
 
-STATUS = {"new": "⏳ Не отправлен", "shipped": "✅ Отправлен/отдан", "cancelled": "❌ Отменён"}
+STATUS = {"new": "⏳ Не отправлен", "shipped": "📦 Отправлен", "cancelled": "❌ Отменён"}
 
 
 def money(value: float) -> str:
@@ -36,21 +36,19 @@ def order_card(order, items, debt: float | None = None) -> str:
         warn = "  ⚠️ нет в каталоге" if not it["known"] else ""
         opts = f" ({escape(it['options'])})" if it["options"] and not it["size"] else ""
         parts.append(f"{escape(_item_title(it))}{opts}{escape(pay)} — {money(it['revenue'])}{warn}")
-    parts.append(f"<b>{dane_line(items)}</b>")
+    paid = f"  ✅ отдано {order['dane_paid_at'][8:10]}.{order['dane_paid_at'][5:7]}" if order["dane_paid_at"] else ""
+    parts.append(f"<b>{dane_line(items)}</b>{paid}")
     if debt is not None:
         parts.append(f"должен Дане всего: {money(debt)}")
 
     parts.append("")
-    if order["source"] == "chat":
-        parts.append("✍️ продажа из чата" + (f" · {escape(order['note'])}" if order["note"] else ""))
-    else:
-        head = [f"🛒 Тильда #{escape(order['order_id'])}"]
-        head += [escape(x) for x in (order["name"], order["phone"]) if x]
-        parts.append(" · ".join(head))
-        if order["delivery"] or order["address"]:
-            parts.append(f"🚚 {escape(order['delivery'] or '')} {escape(order['address'] or '')}".strip())
-        if order["comment"]:
-            parts.append(f"💬 {escape(order['comment'])}")
+    head = [f"🛒 Тильда #{escape(order['order_id'])}"]
+    head += [escape(x) for x in (order["name"], order["phone"]) if x]
+    parts.append(" · ".join(head))
+    if order["delivery"] or order["address"]:
+        parts.append(f"🚚 {escape(order['delivery'] or '')} {escape(order['address'] or '')}".strip())
+    if order["comment"]:
+        parts.append(f"💬 {escape(order['comment'])}")
 
     details = []
     if order["discount"]:
@@ -81,7 +79,7 @@ def totals_text(t: Totals) -> str:
         f"Себестоимость: {money(t.cost)} ₽ · Эквайринг: {money(t.fee)} ₽",
         f"📈 <b>Прибыль бренда: {money(t.brand_profit)} ₽</b>",
         f"💰 Моя доля: {money(t.profit)} ₽",
-        f"💸 Доля Дани: {money(t.dane)} ₽, скинуто {money(t.paid_to_dane)} ₽",
+        f"💸 Доля Дани: {money(t.dane)} ₽, отдано {money(t.paid_to_dane)} ₽",
         f"<b>Должны Дане: {money(t.dane_debt)} ₽</b>",
     ])
 

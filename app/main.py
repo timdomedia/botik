@@ -49,7 +49,8 @@ async def main() -> None:
     if settings.reminder_hour is not None:
         asyncio.create_task(reminder_loop(app))
     asyncio.create_task(sheets.sync())
-    await dp.start_polling(bot)
+    # message_reaction приходит, только если явно запросить и бот — админ чата
+    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 
 if __name__ == "__main__":

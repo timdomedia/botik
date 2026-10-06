@@ -56,16 +56,16 @@ class Sheets:
         self._write("Заказы", self._orders())
         self._write("Размеры", self._sizes())
         self._write("Отправка", self._shipping())
-        self._write("Выплаты Дане", self._payouts())
+        self._write("Дане", self._dane())
 
     def _orders(self) -> list[list]:
-        rows = [["Дата", "Заказ", "Источник", "Оплата", "Клиент", "Товар", "Размер", "Кол-во", "Выручка", "Комиссия",
-                 "Себестоимость", "Прибыль бренда", "Дане", "Мне", "Статус", "Трек", "Отправлен"]]
+        rows = [["Дата", "Заказ", "Оплата", "Клиент", "Товар", "Размер", "Кол-во", "Выручка", "Комиссия",
+                 "Себестоимость", "Прибыль бренда", "Дане", "Мне", "Дане отдано", "Статус", "Трек", "Отправлен"]]
         for it in self.db.all_items():
-            rows.append([it["created_at"], it["order_id"], "чат" if it["source"] == "chat" else "Тильда",
-                         it["payment"], it["client"], it["product"], it["size"],
+            rows.append([it["created_at"], it["order_id"], it["payment"], it["client"], it["product"], it["size"],
                          it["qty"], it["revenue"], it["fee"], it["cost"], it["brand_profit"], it["dane"], it["profit"],
-                         STATUS.get(it["status"], it["status"]), it["track"], it["shipped_at"]])
+                         it["dane_paid_at"] or "❌ нет", STATUS.get(it["status"], it["status"]),
+                         it["track"], it["shipped_at"]])
         return rows
 
     def _sizes(self) -> list[list]:
@@ -115,13 +115,15 @@ class Sheets:
             ["Себестоимость", t.cost],
             ["Прибыль бренда", t.brand_profit],
             ["Доля Дани начислено", t.dane],
-            ["Дане скинуто", t.paid_to_dane],
+            ["Дане отдано", t.paid_to_dane],
             ["Должны Дане", t.dane_debt],
             ["Моя доля", t.profit],
             ["Обновлено", datetime.now().strftime("%Y-%m-%d %H:%M")],
         ]
 
-    def _payouts(self) -> list[list]:
-        rows = [["Дата", "Сумма", "Комментарий"]]
-        rows += [[p["created_at"], p["amount"], p["note"]] for p in self.db.payouts()]
+    def _dane(self) -> list[list]:
+        """Сначала не отданные Дане заказы, потом отданные."""
+        rows = [["Заказ", "Дата", "Клиент", "Товары", "Дане", "Отдано"]]
+        rows += [[r["order_id"], r["created_at"], r["name"], r["products"], r["dane"], r["dane_paid_at"] or "❌ нет"]
+                 for r in self.db.dane_by_order()]
         return rows

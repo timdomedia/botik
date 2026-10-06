@@ -23,6 +23,7 @@ class Settings:
     port: int
     acquiring_percent: float
     dane_share_percent: float
+    payer_ids: frozenset[int]   # чьи реакции считаются «отдал Дане»; пусто = чьи угодно
     ship_deadline_days: int
     reminder_hour: int | None
     sheet_id: str
@@ -41,6 +42,7 @@ def load_settings() -> Settings:
         port=int(os.getenv("PORT", "8080")),
         acquiring_percent=float(os.getenv("ACQUIRING_PERCENT", "0")),
         dane_share_percent=float(os.getenv("DANE_SHARE_PERCENT", "50")),
+        payer_ids=frozenset(int(x) for x in os.getenv("PAYER_IDS", "").replace(",", " ").split()),
         ship_deadline_days=int(os.getenv("SHIP_DEADLINE_DAYS", "3")),
         reminder_hour=int(reminder) if reminder else None,
         sheet_id=os.getenv("GOOGLE_SHEET_ID", "").strip(),

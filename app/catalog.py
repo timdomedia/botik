@@ -23,24 +23,20 @@ def _for_size(table: dict, size: str | None) -> float:
 @dataclass
 class Product:
     name: str
-    match: list[str]               # как товар называется в Тильде и в чате (без регистра)
+    match: list[str]               # как товар называется в Тильде (без регистра) или артикул
     cost: dict[str, float]         # себестоимость 1 шт. по размерам, "default" для остальных
-    price: dict[str, float] = field(default_factory=dict)  # розничная цена (для продаж из чата)
     outerwear: bool = False
     stock: dict[str, int] = field(default_factory=dict)
 
     def cost_for(self, size: str | None) -> float:
         return _for_size(self.cost, size)
 
-    def price_for(self, size: str | None) -> float:
-        return _for_size(self.price, size)
-
 
 @dataclass
 class PaymentMethod:
-    key: str              # как пишем в чате: «долями», «переводом»…
+    key: str              # как показывать: «долями», «картой»…
     fee: float            # комиссия, %
-    aliases: list[str]    # подстроки для распознавания (в чате и в paymentsystem Тильды)
+    aliases: list[str]    # подстроки для распознавания paymentsystem Тильды
 
 
 DEFAULT_PAYMENTS = [
@@ -75,7 +71,6 @@ class Catalog:
                 name=item["name"],
                 match=match,
                 cost=_by_size(item.get("cost", 0)),
-                price=_by_size(item.get("price")),
                 outerwear=bool(item.get("outerwear", False)),
                 stock=_by_size(item.get("stock"), int),
             ))
@@ -87,7 +82,7 @@ class Catalog:
         return cls(products, payments)
 
     def find(self, name: str, sku: str = "") -> Product | None:
-        """Товар по артикулу или по самому длинному совпавшему названию («зипка тайно» > «тайно»)."""
+        """Товар по артикулу или по самому длинному совпавшему названию («Зипка Тайно» > «Тайно»)."""
         name_l, sku_l = (name or "").lower(), (sku or "").lower()
         best, best_len = None, 0
         for product in self.products:
