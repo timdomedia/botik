@@ -8,15 +8,14 @@ import yaml
 class Product:
     name: str
     match: list[str]
-    dane: dict[str, float]  # размер -> выплата, ключ "default" для остальных
-    cost: float = 0
+    cost: dict[str, float]  # размер -> себестоимость 1 шт., ключ "default" для остальных
     outerwear: bool = False
     stock: dict[str, int] = field(default_factory=dict)
 
-    def dane_for(self, size: str | None) -> float:
-        if size and size.upper() in self.dane:
-            return self.dane[size.upper()]
-        return self.dane.get("default", 0)
+    def cost_for(self, size: str | None) -> float:
+        if size and size.upper() in self.cost:
+            return self.cost[size.upper()]
+        return self.cost.get("default", 0)
 
 
 class Catalog:
@@ -31,19 +30,18 @@ class Catalog:
         raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
         products = []
         for item in raw.get("products", []):
-            dane = item.get("dane", 0)
-            if isinstance(dane, dict):
-                dane = {str(k).upper() if k != "default" else "default": float(v) for k, v in dane.items()}
+            cost = item.get("cost", 0)
+            if isinstance(cost, dict):
+                cost = {str(k).upper() if k != "default" else "default": float(v) for k, v in cost.items()}
             else:
-                dane = {"default": float(dane)}
+                cost = {"default": float(cost)}
             match = item.get("match") or [item["name"]]
             if isinstance(match, str):
                 match = [match]
             products.append(Product(
                 name=item["name"],
                 match=[str(m).lower() for m in match],
-                dane=dane,
-                cost=float(item.get("cost", 0)),
+                cost=cost,
                 outerwear=bool(item.get("outerwear", False)),
                 stock={str(k).upper(): int(v) for k, v in (item.get("stock") or {}).items()},
             ))

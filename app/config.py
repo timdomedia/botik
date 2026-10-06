@@ -22,6 +22,7 @@ class Settings:
     tilda_token: str
     port: int
     acquiring_percent: float
+    dane_share_percent: float
     ship_deadline_days: int
     reminder_hour: int | None
     sheet_id: str
@@ -39,6 +40,7 @@ def load_settings() -> Settings:
         tilda_token=os.getenv("TILDA_TOKEN", ""),
         port=int(os.getenv("PORT", "8080")),
         acquiring_percent=float(os.getenv("ACQUIRING_PERCENT", "0")),
+        dane_share_percent=float(os.getenv("DANE_SHARE_PERCENT", "50")),
         ship_deadline_days=int(os.getenv("SHIP_DEADLINE_DAYS", "3")),
         reminder_hour=int(reminder) if reminder else None,
         sheet_id=os.getenv("GOOGLE_SHEET_ID", "").strip(),

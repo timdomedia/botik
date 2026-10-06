@@ -9,13 +9,12 @@ CATALOG = """
 products:
   - name: Пуховик Arctic
     match: ["ARCTIC"]
-    dane: {default: 4500, XL: 5000}
-    cost: 300
+    cost: {default: 5000, XL: 6000}
     outerwear: true
     stock: {M: 3, L: 2, XL: 1}
   - name: Худи
     match: ["худи"]
-    dane: 1200
+    cost: 1000
 """
 
 
@@ -63,15 +62,20 @@ def test_profit_and_dane(tmp_path):
     jacket, hoodie = items
     # скидка 1000 делится пропорционально 12000:5000
     assert round(jacket["revenue"]) == 11294 and round(hoodie["revenue"]) == 4706
-    assert jacket["dane"] == 5000 and hoodie["dane"] == 2400
-    assert jacket["profit"] == round(jacket["revenue"] - 5000 - 300, 2)
+    # прибыль бренда = выручка − себестоимость, Дане и мне по 50%
+    assert jacket["brand_profit"] == round(jacket["revenue"] - 6000, 2)
+    assert hoodie["brand_profit"] == round(hoodie["revenue"] - 2000, 2)
+    for it in items:
+        assert it["dane"] + it["profit"] == it["brand_profit"]
+        assert abs(it["dane"] - it["brand_profit"] / 2) < 0.01
     card = order_card(db.order(pk), items)
-    assert "Пуховик Arctic XL — 5 000" in card and "Худи M ×2 — 2 400" in card and "Итого: 7 400" in card
+    assert "Пуховик Arctic XL — 2 647.06" in card and "Худи M ×2 — 1 352.94" in card
+    assert "Итого: 4 000" in card and "Дане (50%)" in card and "Мне: <b>4 000 ₽" in card
 
     t = db.totals()
-    assert t.dane == 7400 and t.not_shipped == 1
-    db.add_payout(5000)
-    assert db.totals().dane_debt == 2400
+    assert t.brand_profit == 8000 and t.dane == 4000 and t.not_shipped == 1
+    db.add_payout(3000)
+    assert db.totals().dane_debt == 1000
     db.set_status(pk, "shipped", "RA123456789RU")
     assert db.totals().shipped == 1 and db.not_shipped() == []
 

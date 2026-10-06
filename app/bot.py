@@ -51,15 +51,18 @@ class App:
         if self.db.exists(order.order_id):
             log.info("duplicate order %s ignored", order.order_id)
             return False
-        pk = self.db.save_order(order, self.catalog, self.settings.acquiring_percent)
+        pk = self.db.save_order(order, self.catalog, self.settings.acquiring_percent,
+                                self.settings.dane_share_percent)
         await self.post_order(pk)
         await self.sheets.sync()
         return True
 
+    def card(self, row) -> str:
+        return order_card(row, self.db.items(row["id"]), self.settings.dane_share_percent)
+
     async def post_order(self, pk: int) -> None:
         row = self.db.order(pk)
-        msg = await self.bot.send_message(self.settings.chat_id, order_card(row, self.db.items(pk)),
-                                          reply_markup=keyboard(row))
+        msg = await self.bot.send_message(self.settings.chat_id, self.card(row), reply_markup=keyboard(row))
         self.db.set_message_id(pk, msg.message_id)
 
     async def refresh_card(self, pk: int) -> None:
@@ -67,7 +70,7 @@ class App:
         if not row["message_id"]:
             return
         try:
-            await self.bot.edit_message_text(order_card(row, self.db.items(pk)), chat_id=self.settings.chat_id,
+            await self.bot.edit_message_text(self.card(row), chat_id=self.settings.chat_id,
                                              message_id=row["message_id"], reply_markup=keyboard(row))
         except Exception as e:  # сообщение удалено / не изменилось
             log.warning("cannot edit card %s: %s", pk, e)

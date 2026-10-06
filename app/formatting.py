@@ -1,4 +1,4 @@
-"""Тексты сообщений в чат. Строка «Дане» — в формате «товар размер — сумма», как пишем руками."""
+"""Тексты сообщений в чат. Блок «Дане» — по строке «товар размер — сумма» на каждый товар."""
 from html import escape
 
 from .catalog import Catalog
@@ -31,7 +31,7 @@ def dane_lines(items) -> str:
     return "\n".join(lines)
 
 
-def order_card(order, items) -> str:
+def order_card(order, items, share: float = 50) -> str:
     parts = [f"🛒 <b>Заказ #{escape(order['order_id'])}</b>  ·  {order['created_at']}"]
     client = " · ".join(escape(x) for x in (order["name"], order["phone"]) if x)
     if client:
@@ -54,20 +54,19 @@ def order_card(order, items) -> str:
         parts.append(f"Доставка: {money(order['delivery_price'])} ₽")
     parts.append(f"Оплачено: <b>{money(order['total'])} ₽</b>")
 
-    parts.append("")
-    parts.append("💸 <b>Дане:</b>")
-    parts.append(dane_lines(items))
-
     fee = sum(it["fee"] for it in items)
     cost = sum(it["cost"] for it in items)
-    profit = sum(it["profit"] for it in items)
-    extra = []
+    extra = [f"себестоимость {money(cost)}"]
     if fee:
         extra.append(f"эквайринг {money(fee)}")
-    if cost:
-        extra.append(f"расходы {money(cost)}")
     parts.append("")
-    parts.append(f"💰 Чистая: <b>{money(profit)} ₽</b>" + (f"  <i>({', '.join(extra)})</i>" if extra else ""))
+    parts.append(f"📈 Прибыль бренда: <b>{money(sum(it['brand_profit'] for it in items))} ₽</b>"
+                 f"  <i>({', '.join(extra)})</i>")
+    parts.append("")
+    parts.append(f"💸 <b>Дане ({money(share)}%):</b>")
+    parts.append(dane_lines(items))
+    parts.append("")
+    parts.append(f"💰 Мне: <b>{money(sum(it['profit'] for it in items))} ₽</b>")
 
     status = STATUS.get(order["status"], order["status"])
     if order["status"] == "shipped":
@@ -84,11 +83,11 @@ def totals_text(t: Totals) -> str:
         "📊 <b>Сводка</b>",
         f"Заказов: {t.orders}  (✅ {t.shipped} · ⏳ {t.not_shipped} · ❌ {t.cancelled})",
         f"Выручка: {money(t.revenue)} ₽",
-        f"Дане начислено: {money(t.dane)} ₽",
-        f"Дане скинуто: {money(t.paid_to_dane)} ₽",
+        f"Себестоимость: {money(t.cost)} ₽ · Эквайринг: {money(t.fee)} ₽",
+        f"📈 <b>Прибыль бренда: {money(t.brand_profit)} ₽</b>",
+        f"💰 Моя доля: {money(t.profit)} ₽",
+        f"💸 Доля Дани: {money(t.dane)} ₽, скинуто {money(t.paid_to_dane)} ₽",
         f"<b>Должны Дане: {money(t.dane_debt)} ₽</b>",
-        f"Эквайринг: {money(t.fee)} ₽ · Расходы: {money(t.cost)} ₽",
-        f"💰 <b>Чистая прибыль: {money(t.profit)} ₽</b>",
     ])
 
 

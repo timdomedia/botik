@@ -60,10 +60,10 @@ class Sheets:
 
     def _orders(self) -> list[list]:
         rows = [["Дата", "Заказ", "Клиент", "Товар", "Размер", "Кол-во", "Выручка", "Эквайринг",
-                 "Дане", "Расходы", "Чистая", "Статус", "Трек", "Отправлен"]]
+                 "Себестоимость", "Прибыль бренда", "Дане", "Мне", "Статус", "Трек", "Отправлен"]]
         for it in self.db.all_items():
             rows.append([it["created_at"], it["order_id"], it["client"], it["product"], it["size"],
-                         it["qty"], it["revenue"], it["fee"], it["dane"], it["cost"], it["profit"],
+                         it["qty"], it["revenue"], it["fee"], it["cost"], it["brand_profit"], it["dane"], it["profit"],
                          STATUS.get(it["status"], it["status"]), it["track"], it["shipped_at"]])
         return rows
 
@@ -111,11 +111,12 @@ class Sheets:
             ["❌ Отменено", t.cancelled],
             ["Выручка", t.revenue],
             ["Эквайринг", t.fee],
-            ["Расходы", t.cost],
-            ["Дане начислено", t.dane],
+            ["Себестоимость", t.cost],
+            ["Прибыль бренда", t.brand_profit],
+            ["Доля Дани начислено", t.dane],
             ["Дане скинуто", t.paid_to_dane],
             ["Должны Дане", t.dane_debt],
-            ["Чистая прибыль", t.profit],
+            ["Моя доля", t.profit],
             ["Обновлено", datetime.now().strftime("%Y-%m-%d %H:%M")],
         ]
 

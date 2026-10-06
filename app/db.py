@@ -31,9 +31,10 @@ CREATE TABLE IF NOT EXISTS items (
     qty INTEGER NOT NULL,
     revenue REAL NOT NULL,      -- после скидки, без доставки
     fee REAL NOT NULL,          -- эквайринг
-    dane REAL NOT NULL,         -- скинуть Дане
-    cost REAL NOT NULL,         -- прочая себестоимость
-    profit REAL NOT NULL        -- чистая
+    cost REAL NOT NULL,         -- себестоимость
+    brand_profit REAL NOT NULL, -- прибыль бренда = выручка − эквайринг − себестоимость
+    dane REAL NOT NULL,         -- доля Дани (DANE_SHARE_PERCENT от прибыли бренда)
+    profit REAL NOT NULL        -- моя доля
 );
 CREATE TABLE IF NOT EXISTS payouts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,8 +54,9 @@ class Totals:
     orders: int
     revenue: float
     fee: float
-    dane: float
     cost: float
+    brand_profit: float
+    dane: float
     profit: float
     paid_to_dane: float
     shipped: int
@@ -76,7 +78,8 @@ class DB:
     def exists(self, order_id: str) -> bool:
         return self.conn.execute("SELECT 1 FROM orders WHERE order_id=?", (order_id,)).fetchone() is not None
 
-    def save_order(self, order: Order, catalog: Catalog, acquiring_percent: float) -> int:
+    def save_order(self, order: Order, catalog: Catalog, acquiring_percent: float,
+                   dane_share_percent: float = 50) -> int:
         """Сохраняет заказ и считает деньги по каждой позиции. Возвращает pk заказа."""
         with self.conn:
             cur = self.conn.execute(
@@ -94,15 +97,17 @@ class DB:
                 discount_share = order.discount * item.amount / gross
                 revenue = round(item.amount - discount_share, 2)
                 fee = round(revenue * acquiring_percent / 100, 2)
-                dane = product.dane_for(item.size) * item.qty if product else 0
-                cost = product.cost * item.qty if product else 0
-                profit = round(revenue - fee - dane - cost, 2)
+                cost = product.cost_for(item.size) * item.qty if product else 0
+                brand_profit = round(revenue - fee - cost, 2)
+                dane = round(brand_profit * dane_share_percent / 100, 2)
+                profit = round(brand_profit - dane, 2)
                 self.conn.execute(
                     """INSERT INTO items (order_pk, product, raw_name, known, outerwear, size, options,
-                       qty, revenue, fee, dane, cost, profit) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       qty, revenue, fee, cost, brand_profit, dane, profit)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (pk, product.name if product else item.name, item.name, int(bool(product)),
                      int(bool(product and product.outerwear)), item.size, item.options, item.qty,
-                     revenue, fee, dane, cost, profit),
+                     revenue, fee, cost, brand_profit, dane, profit),
                 )
         return pk
 
@@ -170,7 +175,8 @@ class DB:
         money = self.conn.execute(
             """SELECT COUNT(DISTINCT o.id) AS orders, COALESCE(SUM(i.revenue),0) AS revenue,
                       COALESCE(SUM(i.fee),0) AS fee, COALESCE(SUM(i.dane),0) AS dane,
-                      COALESCE(SUM(i.cost),0) AS cost, COALESCE(SUM(i.profit),0) AS profit
+                      COALESCE(SUM(i.cost),0) AS cost, COALESCE(SUM(i.brand_profit),0) AS brand_profit,
+                      COALESCE(SUM(i.profit),0) AS profit
                FROM orders o LEFT JOIN items i ON i.order_pk = o.id WHERE o.status != 'cancelled'"""
         ).fetchone()
         status = dict(self.conn.execute(
@@ -178,7 +184,7 @@ class DB:
         paid = self.conn.execute("SELECT COALESCE(SUM(amount),0) FROM payouts").fetchone()[0]
         return Totals(
             orders=money["orders"], revenue=money["revenue"], fee=money["fee"], dane=money["dane"],
-            cost=money["cost"], profit=money["profit"], paid_to_dane=paid,
+            cost=money["cost"], brand_profit=money["brand_profit"], profit=money["profit"], paid_to_dane=paid,
             shipped=status.get("shipped", 0), not_shipped=status.get("new", 0),
             cancelled=status.get("cancelled", 0),
         )
