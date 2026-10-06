@@ -1,0 +1,4 @@
+aiogram==3.31.0
+aiohttp>=3.9
+gspread==6.2.1
+PyYAML>=6.0
