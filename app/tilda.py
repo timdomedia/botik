@@ -33,6 +33,7 @@ class Order:
     discount: float = 0
     total: float = 0
     comment: str = ""
+    payment_system: str = ""   # paymentsystem из Тильды или способ оплаты из чата
     items: list[Item] = field(default_factory=list)
 
 
@@ -135,5 +136,7 @@ def parse(data: dict) -> Order:
         discount=_num(payment.get("discount")) or _num(payment.get("discountvalue")),
         total=_num(payment.get("amount")),
         comment=_pick(data, "Comment", "comment", "Комментарий"),
+        payment_system=_pick(data, "paymentsystem", "payment_system")
+        or str(payment.get("sys") or payment.get("paymentsystem") or ""),
         items=items,
     )

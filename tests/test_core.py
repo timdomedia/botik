@@ -68,9 +68,9 @@ def test_profit_and_dane(tmp_path):
     for it in items:
         assert it["dane"] + it["profit"] == it["brand_profit"]
         assert abs(it["dane"] - it["brand_profit"] / 2) < 0.01
-    card = order_card(db.order(pk), items)
-    assert "Пуховик Arctic XL — 2 647.06" in card and "Худи M ×2 — 1 352.94" in card
-    assert "Итого: 4 000" in card and "Дане (50%)" in card and "Мне: <b>4 000 ₽" in card
+    card = order_card(db.order(pk), items, debt=4000)
+    assert "Пуховик Arctic XL — 11 294" in card and "Худи M ×2 — 4 706" in card
+    assert "Дане: 2 647 + 1 353 = 4 000" in card and "должен Дане всего: 4 000" in card
 
     t = db.totals()
     assert t.brand_profit == 8000 and t.dane == 4000 and t.not_shipped == 1
@@ -91,3 +91,85 @@ def test_unknown_product(tmp_path):
     pk = db.save_order(parse({"payment": {"orderid": "9", "products": [{"name": "Что-то", "amount": 100}]}}),
                        Catalog([]), 0)
     assert "нет в каталоге" in order_card(db.order(pk), db.items(pk))
+
+
+CHAT_CATALOG = """
+products:
+  - name: Тайно
+    price: 4500
+    cost: 1500
+  - name: Зипка Тайно
+    match: ["зипка тайно", "зип тайно"]
+    price: 7000
+    cost: 2500
+  - name: Шуба
+    price: {default: 25000, XL: 27000}
+    cost: 9000
+    outerwear: true
+  - name: Бомбер
+    price: 12000
+    cost: 4000
+    outerwear: true
+  - name: Кружево
+    price: 3000
+    cost: 800
+  - name: Реквием
+    price: 6000
+    cost: 2000
+"""
+
+
+def chat_catalog(tmp_path):
+    p = tmp_path / "products.yaml"
+    p.write_text(CHAT_CATALOG, encoding="utf-8")
+    return Catalog.load(str(p))
+
+
+def test_parse_chat_messages(tmp_path):
+    from app.chat import parse_payout, parse_sale
+    cat = chat_catalog(tmp_path)
+
+    s = parse_sale("шуба Л с капюшоном долями", cat)
+    assert (s.product.name, s.size, s.qty, s.price, s.payment.key) == ("Шуба", "L", 1, 25000, "долями")
+
+    s = parse_sale("2 тайно долями", cat)
+    assert (s.product.name, s.qty, s.price, s.size) == ("Тайно", 2, 9000, "")
+
+    s = parse_sale("зипка тайно дернул переводом", cat)
+    assert (s.product.name, s.payment.key) == ("Зипка Тайно", "переводом")
+
+    s = parse_sale("бомбер с промо 5%", cat)
+    assert (s.product.name, s.price, s.discount, s.amount, s.size) == ("Бомбер", 12000, 600, 11400, "")
+    assert s.confident
+
+    s = parse_sale("кружево 2000", cat)
+    assert (s.price, s.confident) == (2000, True)
+
+    assert parse_sale("реквием долями", cat).payment.key == "долями"
+    assert parse_sale("тайно наликом 4к", cat).price == 4000
+    assert not parse_sale("тайно закончились?", cat).confident
+    assert not parse_sale("реквием", cat).confident
+    assert parse_sale("привет, как дела", cat) is None
+
+    assert parse_payout("Наликом 30к✅") == 30000
+    assert parse_payout("5к в долг") == 5000
+    assert parse_payout("скинул 12 000") == 12000 and parse_payout("скинул 12000") == 12000
+    assert parse_sale("кружево 2 500 переводом", cat).price == 2500
+    assert parse_payout("бомбер с промо 5%") is None
+
+
+def test_payment_fee(tmp_path):
+    cat = chat_catalog(tmp_path)
+    db = DB(str(tmp_path / "t.db"))
+    from app.tilda import Item, Order
+    pk = db.save_order(Order(order_id="c1", payment_system="долями",
+                             items=[Item(name="Шуба", qty=1, price=25000, amount=25000, size="L")]),
+                       cat, acquiring_percent=3.5, source="chat", status="shipped")
+    it = db.items(pk)[0]
+    assert it["fee"] == 1750  # 7% долями
+    assert it["brand_profit"] == 25000 - 1750 - 9000 and it["dane"] == 7125
+    assert db.order(pk)["payment"] == "долями" and db.order(pk)["status"] == "shipped"
+    # Тильда с картой
+    pk = db.save_order(parse({"paymentsystem": "tinkoff", "payment": {"orderid": "t1", "products": [
+        {"name": "Кружево", "amount": 3000, "quantity": 1}]}}), cat, acquiring_percent=3.5)
+    assert db.items(pk)[0]["fee"] == 105 and db.order(pk)["payment"] == "картой"

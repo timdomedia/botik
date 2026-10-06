@@ -59,10 +59,11 @@ class Sheets:
         self._write("Выплаты Дане", self._payouts())
 
     def _orders(self) -> list[list]:
-        rows = [["Дата", "Заказ", "Клиент", "Товар", "Размер", "Кол-во", "Выручка", "Эквайринг",
+        rows = [["Дата", "Заказ", "Источник", "Оплата", "Клиент", "Товар", "Размер", "Кол-во", "Выручка", "Комиссия",
                  "Себестоимость", "Прибыль бренда", "Дане", "Мне", "Статус", "Трек", "Отправлен"]]
         for it in self.db.all_items():
-            rows.append([it["created_at"], it["order_id"], it["client"], it["product"], it["size"],
+            rows.append([it["created_at"], it["order_id"], "чат" if it["source"] == "chat" else "Тильда",
+                         it["payment"], it["client"], it["product"], it["size"],
                          it["qty"], it["revenue"], it["fee"], it["cost"], it["brand_profit"], it["dane"], it["profit"],
                          STATUS.get(it["status"], it["status"]), it["track"], it["shipped_at"]])
         return rows

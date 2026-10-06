@@ -4,13 +4,14 @@ from datetime import datetime, timedelta
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, ReplyParameters
 
 from .catalog import Catalog
+from .chat import Sale, parse_payout, parse_sale
 from .db import DB
 from .formatting import money, order_card, sizes_text, totals_text
 from .sheets import Sheets
-from .tilda import Order
+from .tilda import Item, Order
 
 log = logging.getLogger(__name__)
 TRACK_RE = re.compile(r"(?=.*\d)[A-Za-z0-9-]{8,40}")
@@ -18,19 +19,29 @@ TRACK_RE = re.compile(r"(?=.*\d)[A-Za-z0-9-]{8,40}")
 HELP = """<b>Команды</b>
 /pending — не отправленные заказы
 /sizes — верхняя одежда по размерам
-/stats — выручка, чистая, долг Дане
+/stats — выручка, прибыль, долг Дане
 /paid 5000 [коммент] — скинул Дане сумму
 /ship 1234 [трек] — отметить заказ отправленным
 /sync — обновить онлайн-таблицу
 /reload — перечитать каталог products.yaml
 /chatid — id этого чата
 
-Под каждым заказом кнопки «Отправлено» / «Отмена».
+<b>Продажи из чата</b> пишем как обычно: «шуба Л с капюшоном долями», «2 тайно переводом»,
+«кружево 2000», «бомбер с промо 5%». Бот ответит, сколько Дане, и запишет в таблицу.
+«Наликом 30к», «скинул 12к» — бот предложит записать выплату Дане.
+
+Под заказом с Тильды кнопки «Отправлено» / «Отмена».
 Ответь (reply) на карточку заказа трек-номером — заказ отметится отправленным с этим треком."""
 
 
 def keyboard(order) -> InlineKeyboardMarkup:
     pk = order["id"]
+    if order["source"] == "chat":
+        if order["status"] == "cancelled":
+            button = InlineKeyboardButton(text="↩️ Вернуть продажу", callback_data=f"restore:{pk}")
+        else:
+            button = InlineKeyboardButton(text="❌ Отменить (ошибся)", callback_data=f"cancel:{pk}")
+        return InlineKeyboardMarkup(inline_keyboard=[[button]])
     if order["status"] == "new":
         rows = [[InlineKeyboardButton(text="📦 Отправлено", callback_data=f"ship:{pk}"),
                  InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancel:{pk}")]]
@@ -57,12 +68,30 @@ class App:
         await self.sheets.sync()
         return True
 
-    def card(self, row) -> str:
-        return order_card(row, self.db.items(row["id"]), self.settings.dane_share_percent)
+    async def chat_sale(self, sale: Sale, message_id: int, author: str, text: str) -> int:
+        order = Order(
+            order_id=f"chat-{message_id}", name=author, comment=text,
+            discount=sale.discount, total=sale.amount,
+            payment_system=sale.payment.key if sale.payment else "",
+            items=[Item(name=sale.product.name, qty=sale.qty, price=sale.price / sale.qty,
+                        amount=sale.price, size=sale.size)],
+        )
+        # без указанного способа оплаты в чате считаем без комиссии (перевод/нал)
+        pk = self.db.save_order(order, self.catalog, 0,
+                                self.settings.dane_share_percent, source="chat", status="shipped",
+                                note=sale.note)
+        await self.post_order(pk, reply_to=message_id)
+        await self.sheets.sync()
+        return pk
 
-    async def post_order(self, pk: int) -> None:
+    def card(self, row) -> str:
+        return order_card(row, self.db.items(row["id"]), self.db.totals().dane_debt)
+
+    async def post_order(self, pk: int, reply_to: int | None = None) -> None:
         row = self.db.order(pk)
-        msg = await self.bot.send_message(self.settings.chat_id, self.card(row), reply_markup=keyboard(row))
+        reply = ReplyParameters(message_id=reply_to, allow_sending_without_reply=True) if reply_to else None
+        msg = await self.bot.send_message(self.settings.chat_id, self.card(row), reply_markup=keyboard(row),
+                                          reply_parameters=reply)
         self.db.set_message_id(pk, msg.message_id)
 
     async def refresh_card(self, pk: int) -> None:
@@ -150,30 +179,97 @@ def build_router(app: App) -> Router:
 
     @router.message(Command("reload"), allowed)
     async def reload(m: Message):
-        app.catalog.products = Catalog.load(app.settings.products_file).products
+        fresh = Catalog.load(app.settings.products_file)
+        app.catalog.products, app.catalog.payments = fresh.products, fresh.payments
         await m.answer(f"Каталог перечитан: {len(app.catalog.products)} товаров. "
                        "Уже пришедшие заказы не пересчитываются.")
 
-    @router.message(allowed, F.reply_to_message, F.text)
-    async def track_reply(m: Message):
-        order = app.db.order_by_message(m.reply_to_message.message_id)
-        if not order or m.text.startswith("/"):
-            return
-        track = re.sub(r"\s+", "", m.text)
-        if not TRACK_RE.fullmatch(track):  # обычный ответ в обсуждении, не трек
-            return
-        await app.set_status(order["id"], "shipped", track)
-        await m.reply(f"✅ #{order['order_id']} отправлен, трек <code>{track}</code>")
+    @router.message(allowed, F.text, ~F.text.startswith("/"))
+    async def on_text(m: Message):
+        # 1) ответ трек-номером на карточку заказа
+        if m.reply_to_message:
+            order = app.db.order_by_message(m.reply_to_message.message_id)
+            track = re.sub(r"\s+", "", m.text)
+            if order and TRACK_RE.fullmatch(track):
+                await app.set_status(order["id"], "shipped", track)
+                await m.reply(f"✅ #{order['order_id']} отправлен, трек <code>{track}</code>")
+                return
 
-    @router.callback_query(F.data.regexp(r"^(ship|cancel|undo):\d+$"))
+        # 2) продажа: «шуба Л с капюшоном долями»
+        sale = parse_sale(m.text, app.catalog)
+        if sale and sale.confident:
+            if not sale.price:
+                await m.reply(f"Понял, что это {sale.product.name}, но не знаю цену. "
+                              f"Напиши с суммой («{sale.product.name.lower()} 4500») "
+                              "или добавь price в products.yaml.")
+                return
+            if app.db.exists(f"chat-{m.message_id}"):
+                return
+            dup = app.db.recent_tilda_order(sale.product.name, sale.size)
+            if dup:
+                kb = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="➕ Это отдельная продажа", callback_data="sale:add"),
+                    InlineKeyboardButton(text="✖️ Это тот же", callback_data="po:no"),
+                ]])
+                await m.reply(f"Похоже, это заказ с Тильды #{dup['order_id']} ({dup['name']}), "
+                              "он уже посчитан. Записать ещё раз?", reply_markup=kb)
+                return
+            await app.chat_sale(sale, m.message_id, m.from_user.full_name if m.from_user else "", m.text)
+            return
+
+        # 3) выплата Дане: «Наликом 30к✅», «скинул 12к»
+        amount = parse_payout(m.text)
+        if amount:
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text=f"✅ Дане отдано {money(amount)}", callback_data=f"po:{amount:g}"),
+                InlineKeyboardButton(text="✖️ Нет", callback_data="po:no"),
+            ]])
+            await m.reply(f"Записать как выплату Дане {money(amount)} ₽?", reply_markup=kb)
+
+    @router.callback_query(F.data == "sale:add")
+    async def on_sale_add(c: CallbackQuery):
+        src = c.message.reply_to_message
+        sale = parse_sale(src.text, app.catalog) if src and src.text else None
+        if c.message.chat.id != app.settings.chat_id or not sale or app.db.exists(f"chat-{src.message_id}"):
+            await c.answer("Уже записано или не нашёл исходное сообщение")
+            return
+        await c.message.delete()
+        await app.chat_sale(sale, src.message_id, src.from_user.full_name if src.from_user else "", src.text)
+        await c.answer("Записал")
+
+    @router.callback_query(F.data.regexp(r"^po:"))
+    async def on_payout(c: CallbackQuery):
+        if c.message.chat.id != app.settings.chat_id:
+            await c.answer()
+            return
+        value = c.data.split(":", 1)[1]
+        if value == "no":
+            await c.message.delete()
+            await c.answer()
+            return
+        if value.startswith("del"):
+            app.db.delete_payout(int(value[3:]))
+            await c.message.edit_text(f"Выплату убрал. Должен Дане: <b>{money(app.db.totals().dane_debt)} ₽</b>")
+        else:
+            src = c.message.reply_to_message
+            note = (src.text or "") if src else ""
+            payout_id = app.db.add_payout(float(value), note)
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="↩️ Отменить", callback_data=f"po:del{payout_id}")]])
+            await c.message.edit_text(f"✅ Дане отдано {money(float(value))} ₽\n"
+                                      f"Должен Дане: <b>{money(app.db.totals().dane_debt)} ₽</b>", reply_markup=kb)
+        await c.answer()
+        await app.sheets.sync()
+
+    @router.callback_query(F.data.regexp(r"^(ship|cancel|undo|restore):\d+$"))
     async def on_button(c: CallbackQuery):
         if c.message.chat.id != app.settings.chat_id:
             await c.answer()
             return
         action, pk = c.data.split(":")
-        status = {"ship": "shipped", "cancel": "cancelled", "undo": "new"}[action]
+        status = {"ship": "shipped", "cancel": "cancelled", "undo": "new", "restore": "shipped"}[action]
         await app.set_status(int(pk), status)
-        await c.answer({"shipped": "Отмечено отправленным", "cancelled": "Заказ отменён",
-                        "new": "Вернул в не отправленные"}[status])
+        await c.answer({"ship": "Отмечено отправленным", "cancel": "Отменено",
+                        "undo": "Вернул в не отправленные", "restore": "Продажа возвращена"}[action])
 
     return router

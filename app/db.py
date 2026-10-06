@@ -1,6 +1,6 @@
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .catalog import Catalog
@@ -17,7 +17,10 @@ CREATE TABLE IF NOT EXISTS orders (
     status TEXT NOT NULL DEFAULT 'new',          -- new | shipped | cancelled
     track TEXT DEFAULT '',
     shipped_at TEXT DEFAULT '',
-    message_id INTEGER
+    message_id INTEGER,
+    source TEXT NOT NULL DEFAULT 'tilda',        -- tilda | chat
+    payment TEXT DEFAULT '',                     -- способ оплаты: долями, переводом…
+    note TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,21 +77,39 @@ class DB:
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        have = {r["name"] for r in self.conn.execute("PRAGMA table_info(orders)")}
+        for column, ddl in (("source", "TEXT NOT NULL DEFAULT 'tilda'"), ("payment", "TEXT DEFAULT ''"),
+                            ("note", "TEXT DEFAULT ''")):
+            if column not in have:
+                self.conn.execute(f"ALTER TABLE orders ADD COLUMN {column} {ddl}")
+        self.conn.commit()
 
     def exists(self, order_id: str) -> bool:
         return self.conn.execute("SELECT 1 FROM orders WHERE order_id=?", (order_id,)).fetchone() is not None
 
     def save_order(self, order: Order, catalog: Catalog, acquiring_percent: float,
-                   dane_share_percent: float = 50) -> int:
-        """Сохраняет заказ и считает деньги по каждой позиции. Возвращает pk заказа."""
+                   dane_share_percent: float = 50, source: str = "tilda", status: str = "new",
+                   note: str = "") -> int:
+        """Сохраняет заказ и считает деньги по каждой позиции. Возвращает pk заказа.
+
+        Комиссия берётся по способу оплаты (долями, СБП, перевод…), если он распознан,
+        иначе acquiring_percent."""
+        method = catalog.payment(order.payment_system)
+        fee_percent = method.fee if method else acquiring_percent
+        payment = method.key if method else order.payment_system
         with self.conn:
             cur = self.conn.execute(
                 """INSERT INTO orders (order_id, created_at, name, phone, email, address, delivery,
-                   delivery_price, promocode, discount, total, comment)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   delivery_price, promocode, discount, total, comment, source, payment, note,
+                   status, shipped_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (order.order_id, now(), order.name, order.phone, order.email, order.address,
                  order.delivery, order.delivery_price, order.promocode, order.discount,
-                 order.total, order.comment),
+                 order.total, order.comment, source, payment, note,
+                 status, now() if status == "shipped" else ""),
             )
             pk = cur.lastrowid
             gross = sum(i.amount for i in order.items) or 1
@@ -96,7 +117,7 @@ class DB:
                 product = catalog.find(item.name, item.sku)
                 discount_share = order.discount * item.amount / gross
                 revenue = round(item.amount - discount_share, 2)
-                fee = round(revenue * acquiring_percent / 100, 2)
+                fee = round(revenue * fee_percent / 100, 2)
                 cost = product.cost_for(item.size) * item.qty if product else 0
                 brand_profit = round(revenue - fee - cost, 2)
                 dane = round(brand_profit * dane_share_percent / 100, 2)
@@ -137,6 +158,17 @@ class DB:
                 self.conn.execute("UPDATE orders SET status=?, shipped_at=? WHERE id=?",
                                   (status, shipped_at, pk))
 
+    def recent_tilda_order(self, product: str, size: str, hours: int = 72) -> sqlite3.Row | None:
+        """Заказ с Тильды с тем же товаром (и размером) за последние часы — чтобы не задвоить продажу."""
+        since = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M")
+        return self.conn.execute(
+            """SELECT o.* FROM orders o JOIN items i ON i.order_pk = o.id
+               WHERE o.source = 'tilda' AND o.status != 'cancelled' AND o.created_at >= ?
+                 AND i.product = ? AND (? = '' OR i.size = ?)
+               ORDER BY o.created_at DESC LIMIT 1""",
+            (since, product, size, size),
+        ).fetchone()
+
     def not_shipped(self) -> list[sqlite3.Row]:
         return self.conn.execute(
             "SELECT * FROM orders WHERE status='new' ORDER BY created_at").fetchall()
@@ -146,14 +178,19 @@ class DB:
 
     def all_items(self) -> list[sqlite3.Row]:
         return self.conn.execute(
-            """SELECT i.*, o.order_id, o.created_at, o.name AS client, o.status, o.track, o.shipped_at
+            """SELECT i.*, o.order_id, o.created_at, o.name AS client, o.status, o.track, o.shipped_at,
+                      o.source, o.payment
                FROM items i JOIN orders o ON o.id = i.order_pk ORDER BY o.created_at, o.id, i.id"""
         ).fetchall()
 
-    def add_payout(self, amount: float, note: str = "") -> None:
+    def delete_payout(self, payout_id: int) -> None:
         with self.conn:
-            self.conn.execute("INSERT INTO payouts (created_at, amount, note) VALUES (?,?,?)",
-                              (now(), amount, note))
+            self.conn.execute("DELETE FROM payouts WHERE id=?", (payout_id,))
+
+    def add_payout(self, amount: float, note: str = "") -> int:
+        with self.conn:
+            return self.conn.execute("INSERT INTO payouts (created_at, amount, note) VALUES (?,?,?)",
+                                     (now(), amount, note)).lastrowid
 
     def payouts(self) -> list[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM payouts ORDER BY id").fetchall()

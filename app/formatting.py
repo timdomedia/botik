@@ -1,16 +1,15 @@
-"""Тексты сообщений в чат. Блок «Дане» — по строке «товар размер — сумма» на каждый товар."""
+"""Тексты сообщений в чат — коротко, как пишем в беседе: «шуба L долями — 25 000», «Дане: 9 650»."""
 from html import escape
 
 from .catalog import Catalog
 from .db import Totals
 
-STATUS = {"new": "⏳ Не отправлен", "shipped": "✅ Отправлен", "cancelled": "❌ Отменён"}
+STATUS = {"new": "⏳ Не отправлен", "shipped": "✅ Отправлен/отдан", "cancelled": "❌ Отменён"}
 
 
 def money(value: float) -> str:
-    value = round(value, 2)
-    text = f"{value:,.2f}".rstrip("0").rstrip(".") if value % 1 else f"{value:,.0f}"
-    return text.replace(",", " ")
+    """Целые рубли с пробелами: 12 345."""
+    return f"{round(value):,}".replace(",", " ")
 
 
 def _item_title(it) -> str:
@@ -22,58 +21,54 @@ def _item_title(it) -> str:
     return title
 
 
-def dane_lines(items) -> str:
-    """Блок «сколько скинуть Дане»: по строке на товар + итог."""
-    lines = [f"{escape(_item_title(it))} — {money(it['dane'])}" for it in items]
-    total = sum(it["dane"] for it in items)
-    if len(items) > 1:
-        lines.append(f"<b>Итого: {money(total)}</b>")
-    return "\n".join(lines)
+def dane_line(items) -> str:
+    """«Дане: 3 290» или «Дане: 3 290 + 1 039 = 4 329» — по слагаемому на товар."""
+    total = money(sum(it["dane"] for it in items))
+    if len(items) == 1:
+        return f"Дане: {total}"
+    return f"Дане: {' + '.join(money(it['dane']) for it in items)} = {total}"
 
 
-def order_card(order, items, share: float = 50) -> str:
-    parts = [f"🛒 <b>Заказ #{escape(order['order_id'])}</b>  ·  {order['created_at']}"]
-    client = " · ".join(escape(x) for x in (order["name"], order["phone"]) if x)
-    if client:
-        parts.append(f"👤 {client}")
-    if order["email"]:
-        parts.append(f"✉️ {escape(order['email'])}")
-    if order["delivery"] or order["address"]:
-        parts.append(f"🚚 {escape(order['delivery'] or '')} {escape(order['address'] or '')}".rstrip())
-    if order["comment"]:
-        parts.append(f"💬 {escape(order['comment'])}")
-
-    parts.append("")
+def order_card(order, items, debt: float | None = None) -> str:
+    pay = f" {order['payment']}" if order["payment"] else ""
+    parts = []
     for it in items:
-        warn = "" if it["known"] else "  ⚠️ нет в каталоге"
-        opts = f" <i>({escape(it['options'])})</i>" if it["options"] and not it["size"] else ""
-        parts.append(f"• {escape(_item_title(it))}{opts} — {money(it['revenue'])} ₽{warn}")
-    if order["promocode"]:
-        parts.append(f"🏷 Промокод {escape(order['promocode'])}, скидка {money(order['discount'])} ₽")
-    if order["delivery_price"]:
-        parts.append(f"Доставка: {money(order['delivery_price'])} ₽")
-    parts.append(f"Оплачено: <b>{money(order['total'])} ₽</b>")
+        warn = "  ⚠️ нет в каталоге" if not it["known"] else ""
+        opts = f" ({escape(it['options'])})" if it["options"] and not it["size"] else ""
+        parts.append(f"{escape(_item_title(it))}{opts}{escape(pay)} — {money(it['revenue'])}{warn}")
+    parts.append(f"<b>{dane_line(items)}</b>")
+    if debt is not None:
+        parts.append(f"должен Дане всего: {money(debt)}")
 
+    parts.append("")
+    if order["source"] == "chat":
+        parts.append("✍️ продажа из чата" + (f" · {escape(order['note'])}" if order["note"] else ""))
+    else:
+        head = [f"🛒 Тильда #{escape(order['order_id'])}"]
+        head += [escape(x) for x in (order["name"], order["phone"]) if x]
+        parts.append(" · ".join(head))
+        if order["delivery"] or order["address"]:
+            parts.append(f"🚚 {escape(order['delivery'] or '')} {escape(order['address'] or '')}".strip())
+        if order["comment"]:
+            parts.append(f"💬 {escape(order['comment'])}")
+
+    details = []
+    if order["discount"]:
+        promo = f" {order['promocode']}" if order["promocode"] else ""
+        details.append(f"промо{escape(promo)} −{money(order['discount'])}")
+    details.append(f"себес {money(sum(it['cost'] for it in items))}")
     fee = sum(it["fee"] for it in items)
-    cost = sum(it["cost"] for it in items)
-    extra = [f"себестоимость {money(cost)}"]
     if fee:
-        extra.append(f"эквайринг {money(fee)}")
-    parts.append("")
-    parts.append(f"📈 Прибыль бренда: <b>{money(sum(it['brand_profit'] for it in items))} ₽</b>"
-                 f"  <i>({', '.join(extra)})</i>")
-    parts.append("")
-    parts.append(f"💸 <b>Дане ({money(share)}%):</b>")
-    parts.append(dane_lines(items))
-    parts.append("")
-    parts.append(f"💰 Мне: <b>{money(sum(it['profit'] for it in items))} ₽</b>")
+        details.append(f"комиссия {money(fee)}")
+    details.append(f"прибыль {money(sum(it['brand_profit'] for it in items))}")
+    details.append(f"мне {money(sum(it['profit'] for it in items))}")
+    parts.append(f"<i>{' · '.join(details)}</i>")
 
     status = STATUS.get(order["status"], order["status"])
     if order["status"] == "shipped":
         status += f" {order['shipped_at']}"
         if order["track"]:
             status += f"\n📮 Трек: <code>{escape(order['track'])}</code>"
-    parts.append("")
     parts.append(status)
     return "\n".join(parts)
 
