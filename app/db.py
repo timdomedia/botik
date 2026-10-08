@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -38,6 +39,17 @@ CREATE TABLE IF NOT EXISTS items (
     brand_profit REAL NOT NULL, -- прибыль бренда = выручка − комиссия − налог − себестоимость
     dane REAL NOT NULL,         -- доля Дани (DANE_SHARE_PERCENT от прибыли бренда)
     profit REAL NOT NULL        -- моя доля
+);
+CREATE TABLE IF NOT EXISTS kv (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS products (       -- каталог, который правится из чата (/cost, /outer)
+    name TEXT PRIMARY KEY,
+    match TEXT NOT NULL DEFAULT '',         -- доп. названия в Тильде через запятую
+    cost REAL NOT NULL DEFAULT 0,
+    cost_by_size TEXT NOT NULL DEFAULT '{}',
+    outerwear INTEGER                       -- NULL = как в products.yaml
 );
 """
 
@@ -125,6 +137,67 @@ class DB:
                      revenue, fee, tax, cost, brand_profit, dane, profit),
                 )
         return pk
+
+    # --- настройки (чат, кто платит) ---
+    def get(self, key: str, default: str = "") -> str:
+        row = self.conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
+        return row[0] if row else default
+
+    def put(self, key: str, value: str) -> None:
+        with self.conn:
+            self.conn.execute("INSERT INTO kv (key, value) VALUES (?,?) "
+                              "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
+    # --- каталог из чата ---
+    def product_rows(self) -> list[dict]:
+        rows = self.conn.execute("SELECT * FROM products ORDER BY name").fetchall()
+        return [{**dict(r), "cost_by_size": json.loads(r["cost_by_size"] or "{}")} for r in rows]
+
+    def set_product_cost(self, name: str, cost: float, size: str = "") -> None:
+        with self.conn:
+            self.conn.execute("INSERT OR IGNORE INTO products (name) VALUES (?)", (name,))
+            if size:
+                by_size = json.loads(self.conn.execute(
+                    "SELECT cost_by_size FROM products WHERE name=?", (name,)).fetchone()[0] or "{}")
+                by_size[size.upper()] = cost
+                self.conn.execute("UPDATE products SET cost_by_size=? WHERE name=?",
+                                  (json.dumps(by_size, ensure_ascii=False), name))
+            else:
+                self.conn.execute("UPDATE products SET cost=? WHERE name=?", (cost, name))
+
+    def set_product_outerwear(self, name: str, outerwear: bool) -> None:
+        with self.conn:
+            self.conn.execute("INSERT OR IGNORE INTO products (name) VALUES (?)", (name,))
+            self.conn.execute("UPDATE products SET outerwear=? WHERE name=?", (int(outerwear), name))
+
+    def recalc_unpaid(self, catalog: Catalog, dane_share_percent: float) -> list[int]:
+        """Пересчитать по текущему каталогу позиции заказов, за которые Дане ещё не отдано.
+        Выручка, комиссия и налог не меняются — только товар, себестоимость и доли. Возвращает pk заказов."""
+        rows = self.conn.execute(
+            """SELECT i.* FROM items i JOIN orders o ON o.id = i.order_pk
+               WHERE o.status != 'cancelled' AND o.dane_paid_at = ''""").fetchall()
+        changed = set()
+        with self.conn:
+            for it in rows:
+                product = catalog.find(it["raw_name"])
+                cost = product.cost_for(it["size"]) * it["qty"] if product else 0
+                brand_profit = round(it["revenue"] - it["fee"] - it["tax"] - cost, 2)
+                dane = round(brand_profit * dane_share_percent / 100, 2)
+                new = (product.name if product else it["raw_name"], int(bool(product)),
+                       int(bool(product and product.outerwear)), cost, brand_profit, dane,
+                       round(brand_profit - dane, 2))
+                old = (it["product"], it["known"], it["outerwear"], it["cost"], it["brand_profit"],
+                       it["dane"], it["profit"])
+                if new != old:
+                    self.conn.execute(
+                        """UPDATE items SET product=?, known=?, outerwear=?, cost=?, brand_profit=?, dane=?,
+                           profit=? WHERE id=?""", (*new, it["id"]))
+                    changed.add(it["order_pk"])
+        return sorted(changed)
+
+    def unposted(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM orders WHERE message_id IS NULL AND status != 'cancelled' ORDER BY id").fetchall()
 
     def set_message_id(self, pk: int, message_id: int) -> None:
         with self.conn:

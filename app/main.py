@@ -25,8 +25,8 @@ async def reminder_loop(app: App) -> None:
         if target <= now:
             target += timedelta(days=1)
         await asyncio.sleep((target - now).total_seconds())
-        if app.db.not_shipped():
-            await app.bot.send_message(app.settings.chat_id, app.pending_text())
+        if app.db.not_shipped() and app.chat_id:
+            await app.bot.send_message(app.chat_id, app.pending_text())
 
 
 async def main() -> None:
@@ -51,7 +51,10 @@ async def main() -> None:
         asyncio.create_task(reminder_loop(app))
     asyncio.create_task(sheets.sync())
     # на токене раньше жил другой проект: снимаем его вебхук, команды, мини-апп, описание
-    await prepare_bot(bot, settings.bot_name)
+    try:
+        await prepare_bot(bot, settings.bot_name)
+    except Exception:  # Telegram недоступен — не падаем, polling сам переподключится
+        logging.exception("bot setup failed, continuing")
     # message_reaction приходит, только если явно запросить и бот — админ чата
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 

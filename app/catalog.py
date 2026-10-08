@@ -81,6 +81,23 @@ class Catalog:
                         for key, cfg in raw["payments"].items()]
         return cls(products, payments)
 
+    def merge_rows(self, rows: list[dict]) -> "Catalog":
+        """Добавить/переопределить товары из таблицы products (заведены из чата командами /cost, /outer)."""
+        for r in rows:
+            product = next((p for p in self.products if p.name.lower() == r["name"].lower()), None)
+            if not product:
+                product = Product(name=r["name"], match=[r["name"].lower()], cost={})
+                self.products.append(product)
+            for m in str(r.get("match") or "").split(","):
+                if m.strip() and m.strip().lower() not in product.match:
+                    product.match.append(m.strip().lower())
+            if r.get("cost"):
+                product.cost["default"] = float(r["cost"])
+            product.cost.update({str(k).upper(): float(v) for k, v in (r.get("cost_by_size") or {}).items()})
+            if r.get("outerwear") is not None:
+                product.outerwear = bool(r["outerwear"])
+        return self
+
     def find(self, name: str, sku: str = "") -> Product | None:
         """Товар по артикулу или по самому длинному совпавшему названию («Зипка Тайно» > «Тайно»)."""
         name_l, sku_l = (name or "").lower(), (sku or "").lower()

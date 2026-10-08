@@ -33,7 +33,7 @@ def order_card(order, items, debt: float | None = None) -> str:
     pay = f" {order['payment']}" if order["payment"] else ""
     parts = []
     for it in items:
-        warn = "  ⚠️ нет в каталоге" if not it["known"] else ""
+        warn = f"  ⚠️ нет себестоимости: /cost {escape(it['product'])} &lt;сумма&gt;" if not it["known"] else ""
         opts = f" ({escape(it['options'])})" if it["options"] and not it["size"] else ""
         parts.append(f"{escape(_item_title(it))}{opts}{escape(pay)} — {money(it['revenue'])}{warn}")
     paid = f"  ✅ отдано {order['dane_paid_at'][8:10]}.{order['dane_paid_at'][5:7]}" if order["dane_paid_at"] else ""

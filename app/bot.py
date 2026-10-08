@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 from datetime import datetime, timedelta
@@ -23,7 +24,14 @@ HELP = """<b>Команды</b>
 /dolg — за какие заказы ещё не отдал Дане
 /ship 1234 [трек] — отметить заказ отправленным
 /sync — обновить онлайн-таблицу
-/reload — перечитать каталог products.yaml
+
+<b>Каталог</b>
+/cost Шуба 9000 — себестоимость (для размера: /cost Шуба 9500 XL)
+/outer Шуба — верхняя одежда, считать по размерам (/outer Шуба нет — убрать)
+/catalog — список товаров
+После /cost и /outer заказы, за которые Дане ещё не отдано, пересчитываются.
+
+/setup — привязать бота к этому чату, а тебя — как того, кто отдаёт Дане
 /chatid — id этого чата и твой id
 
 <b>Отдал Дане</b> — поставь любую реакцию на карточку заказа. Снял реакцию — снова в долг.
@@ -41,11 +49,69 @@ def keyboard(order) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+COST_RE = re.compile(r"^(?P<name>.+?)\s+(?P<cost>\d[\d\s]*(?:[.,]\d+)?)\s*(?:к|k)?(?:\s+(?P<size>[A-Za-zА-Яа-я0-9]{1,4}))?$")
+
+
 class App:
     """Общий контекст: бот, БД, каталог, таблица."""
 
     def __init__(self, bot: Bot, db: DB, catalog: Catalog, sheets: Sheets, settings):
         self.bot, self.db, self.catalog, self.sheets, self.settings = bot, db, catalog, sheets, settings
+        self.reload_catalog()
+
+    # чат и «кто платит» берутся из .env, а если там пусто — из /setup
+    @property
+    def chat_id(self) -> int:
+        return self.settings.chat_id or int(self.db.get("chat_id", "0"))
+
+    @property
+    def payer_ids(self) -> frozenset[int]:
+        return frozenset(self.settings.payer_ids) | frozenset(json.loads(self.db.get("payer_ids", "[]")))
+
+    def in_chat(self, event) -> bool:
+        chat = getattr(event, "chat", None) or getattr(getattr(event, "message", None), "chat", None)
+        return bool(chat and self.chat_id and chat.id == self.chat_id)
+
+    def reload_catalog(self) -> None:
+        fresh = Catalog.load(self.settings.products_file).merge_rows(self.db.product_rows())
+        self.catalog.products, self.catalog.payments = fresh.products, fresh.payments
+
+    async def setup(self, chat_id: int, user_id: int) -> int:
+        """Привязать чат и плательщика, догнать заказы, пришедшие до привязки. Возвращает их число."""
+        self.db.put("chat_id", str(chat_id))
+        self.db.put("payer_ids", json.dumps(sorted(self.payer_ids | {user_id})))
+        pending = self.db.unposted()
+        for o in pending:
+            await self.post_order(o["id"])
+        return len(pending)
+
+    async def recalc(self) -> int:
+        self.reload_catalog()
+        changed = self.db.recalc_unpaid(self.catalog, self.settings.dane_share_percent)
+        for pk in changed:
+            await self.refresh_card(pk)
+        await self.sheets.sync()
+        return len(changed)
+
+    def resolve_product(self, name: str) -> str:
+        """«шуба» -> «Шуба», если такой товар уже есть; иначе имя как написали."""
+        product = self.catalog.by_name(name) or next(
+            (p for p in self.catalog.products if p.name.lower() == name.lower()), None) or self.catalog.find(name)
+        name = name.strip()
+        return product.name if product else name[:1].upper() + name[1:]
+
+    def catalog_text(self) -> str:
+        if not self.catalog.products:
+            return "Каталог пуст. Добавь себестоимость: /cost Шуба 9000"
+        lines = ["📒 <b>Каталог</b>"]
+        for p in sorted(self.catalog.products, key=lambda p: p.name.lower()):
+            sizes = ", ".join(f"{k} {money(v)}" for k, v in p.cost.items() if k != "default")
+            lines.append(f"• {p.name} — {money(p.cost_for(None))}" + (f" ({sizes})" if sizes else "")
+                         + (" 🧥" if p.outerwear else ""))
+        unknown = sorted({it["product"] for it in self.db.all_items() if not it["known"]})
+        if unknown:
+            lines.append("\n⚠️ <b>Без себестоимости:</b> " + ", ".join(unknown))
+        return "\n".join(lines)
 
     async def new_order(self, order: Order) -> bool:
         if not order.order_id:
@@ -63,8 +129,11 @@ class App:
         return order_card(row, self.db.items(row["id"]), self.db.totals().dane_debt)
 
     async def post_order(self, pk: int) -> None:
+        if not self.chat_id:
+            log.warning("order %s saved, but chat is not set yet — run /setup in the chat", pk)
+            return
         row = self.db.order(pk)
-        msg = await self.bot.send_message(self.settings.chat_id, self.card(row), reply_markup=keyboard(row))
+        msg = await self.bot.send_message(self.chat_id, self.card(row), reply_markup=keyboard(row))
         self.db.set_message_id(pk, msg.message_id)
 
     async def refresh_card(self, pk: int) -> None:
@@ -72,7 +141,7 @@ class App:
         if not row["message_id"]:
             return
         try:
-            await self.bot.edit_message_text(self.card(row), chat_id=self.settings.chat_id,
+            await self.bot.edit_message_text(self.card(row), chat_id=self.chat_id,
                                              message_id=row["message_id"], reply_markup=keyboard(row))
         except Exception as e:  # сообщение удалено / не изменилось
             log.warning("cannot edit card %s: %s", pk, e)
@@ -110,12 +179,24 @@ class App:
 
 def build_router(app: App) -> Router:
     router = Router()
-    allowed = F.chat.id == app.settings.chat_id
+    allowed = app.in_chat
 
     @router.message(Command("chatid"))
     async def chatid(m: Message):
         user = f"\nтвой id: <code>{m.from_user.id}</code>" if m.from_user else ""
         await m.answer(f"chat id: <code>{m.chat.id}</code>{user}")
+
+    @router.message(Command("setup"), F.chat.type.in_({"group", "supergroup"}))
+    async def setup(m: Message):
+        if app.chat_id and m.chat.id != app.chat_id:
+            await m.answer("Бот уже привязан к другому чату. Перепривязать можно только оттуда.")
+            return
+        caught_up = await app.setup(m.chat.id, m.from_user.id)
+        await m.answer(
+            "✅ Готово. Заказы с Тильды будут приходить сюда.\n"
+            f"Твои реакции на карточки = «отдал Дане» ({m.from_user.full_name}).\n"
+            + (f"Прислал заказы, пришедшие до привязки: {caught_up}.\n" if caught_up else "")
+            + "\nДальше заведи себестоимость товаров: /cost Шуба 9000\nВсе команды: /help")
 
     @router.message(Command("start", "help"), allowed)
     async def help_(m: Message):
@@ -155,12 +236,43 @@ def build_router(app: App) -> Router:
         await app.sheets.sync()
         await m.answer("Таблица обновлена.")
 
+    @router.message(Command("cost"), allowed)
+    async def cost(m: Message, command: CommandObject):
+        match = COST_RE.match((command.args or "").strip())
+        if not match:
+            await m.answer("Формат: /cost Шуба 9000 или /cost Шуба 9500 XL")
+            return
+        name = app.resolve_product(match["name"])
+        value = float(match["cost"].replace(" ", "").replace(",", "."))
+        if re.search(r"\d\s*[кk]\b", m.text or "", re.I):
+            value *= 1000
+        size = (match["size"] or "").upper().translate(str.maketrans("ХСМЛ", "XSML"))
+        app.db.set_product_cost(name, value, size)
+        changed = await app.recalc()
+        await m.answer(f"✅ {name}{' ' + size if size else ''}: себестоимость {money(value)}"
+                       + (f"\nПересчитал заказов: {changed}" if changed else ""))
+
+    @router.message(Command("outer"), allowed)
+    async def outer(m: Message, command: CommandObject):
+        args = (command.args or "").strip()
+        off = bool(re.search(r"\s(нет|no|off|-)$", args, re.I))
+        name = re.sub(r"\s(нет|no|off|-)$", "", args, flags=re.I).strip()
+        if not name:
+            await m.answer("Формат: /outer Шуба (или /outer Шуба нет)")
+            return
+        name = app.resolve_product(name)
+        app.db.set_product_outerwear(name, not off)
+        await app.recalc()
+        await m.answer(f"{'Убрал' if off else '🧥 Считаю по размерам'}: {name}")
+
+    @router.message(Command("catalog"), allowed)
+    async def catalog(m: Message):
+        await m.answer(app.catalog_text())
+
     @router.message(Command("reload"), allowed)
     async def reload(m: Message):
-        fresh = Catalog.load(app.settings.products_file)
-        app.catalog.products, app.catalog.payments = fresh.products, fresh.payments
-        await m.answer(f"Каталог перечитан: {len(app.catalog.products)} товаров. "
-                       "Уже пришедшие заказы не пересчитываются.")
+        changed = await app.recalc()
+        await m.answer(f"Каталог перечитан: {len(app.catalog.products)} товаров. Пересчитал заказов: {changed}.")
 
     @router.message(allowed, F.reply_to_message, F.text, ~F.text.startswith("/"))
     async def track_reply(m: Message):
@@ -171,10 +283,10 @@ def build_router(app: App) -> Router:
         await app.set_status(order["id"], "shipped", track)
         await m.reply(f"✅ #{order['order_id']} отправлен, трек <code>{track}</code>")
 
-    @router.message_reaction(F.chat.id == app.settings.chat_id)
+    @router.message_reaction(allowed)
     async def on_reaction(r: MessageReactionUpdated):
         """Реакция на карточку заказа = отдал Дане его долю, снял реакцию = не отдал."""
-        payers = app.settings.payer_ids
+        payers = app.payer_ids
         if payers and (not r.user or r.user.id not in payers):
             return
         order = app.db.order_by_message(r.message_id)
@@ -186,7 +298,7 @@ def build_router(app: App) -> Router:
 
     @router.callback_query(F.data.regexp(r"^(ship|cancel|undo):\d+$"))
     async def on_button(c: CallbackQuery):
-        if c.message.chat.id != app.settings.chat_id:
+        if not app.in_chat(c):
             await c.answer()
             return
         action, pk = c.data.split(":")

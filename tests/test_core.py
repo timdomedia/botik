@@ -93,7 +93,7 @@ def test_unknown_product(tmp_path):
     db = DB(str(tmp_path / "t.db"))
     pk = db.save_order(parse({"payment": {"orderid": "9", "products": [{"name": "Что-то", "amount": 100}]}}),
                        Catalog([]), 0)
-    assert "нет в каталоге" in order_card(db.order(pk), db.items(pk))
+    assert "нет себестоимости: /cost Что-то" in order_card(db.order(pk), db.items(pk))
 
 
 PAY_CATALOG = """
@@ -142,6 +142,7 @@ def test_reaction_marks_dane_paid(tmp_path):
             self.sent.append(text)
 
     settings = types.SimpleNamespace(chat_id=1, acquiring_percent=0, dane_share_percent=50, tax_percent=0,
+                                     products_file="nonexistent.yaml",
                                      ship_deadline_days=3, payer_ids=frozenset({42}))
     db = DB(str(tmp_path / "t.db"))
     app = App(FakeBot(), db, Catalog([]), Sheets("", "", db, Catalog([]), 3), settings)
@@ -202,3 +203,70 @@ def test_prepare_bot_cleans_old_project():
     assert next(kw for n, kw in calls if n == "set_chat_menu_button")["menu_button"].type == "commands"
     assert ("set_my_description", {"description": DESCRIPTION}) in calls
     assert ("set_my_name", {"name": "Заказы"}) in calls
+
+
+def test_setup_and_cost_from_chat(tmp_path):
+    """Чат не задан в .env: заказ ждёт /setup; /cost заводит себестоимость и пересчитывает неотданные заказы."""
+    import asyncio
+    import types
+
+    from app.bot import App, build_router
+    from app.sheets import Sheets
+
+    class FakeBot:
+        def __init__(self):
+            self.sent, self.edited = [], []
+
+        async def send_message(self, chat_id, text, **kw):
+            self.sent.append((chat_id, text))
+            return types.SimpleNamespace(message_id=100 + len(self.sent))
+
+        async def edit_message_text(self, text, **kw):
+            self.edited.append(text)
+
+    settings = types.SimpleNamespace(chat_id=0, payer_ids=frozenset(), acquiring_percent=0, dane_share_percent=50,
+                                     tax_percent=0, ship_deadline_days=3, products_file="nonexistent.yaml")
+    db = DB(str(tmp_path / "t.db"))
+    catalog = Catalog([])
+    app = App(FakeBot(), db, catalog, Sheets("", "", db, catalog, 3), settings)
+    router = build_router(app)
+    cmd = {h.callback.__name__: h.callback for h in router.message.handlers}
+    replies = []
+
+    def msg(text, chat_id=-100500, user_id=42):
+        async def answer(t, **kw):
+            replies.append(t)
+        return types.SimpleNamespace(text=text, chat=types.SimpleNamespace(id=chat_id, type="supergroup"),
+                                     from_user=types.SimpleNamespace(id=user_id, full_name="Тимофей"),
+                                     answer=answer)
+
+    def args(text):
+        return types.SimpleNamespace(args=text)
+
+    async def run():
+        await app.new_order(parse({"payment": {"orderid": "1", "products": [
+            {"name": "Шуба с капюшоном", "amount": 20000, "options": [{"option": "Размер", "variant": "L"}]}]}}))
+        assert app.bot.sent == []                       # чат ещё не привязан — заказ ждёт
+
+        await cmd["setup"](msg("/setup"))
+        assert app.chat_id == -100500 and app.payer_ids == {42}
+        assert app.bot.sent[0][0] == -100500 and "нет себестоимости" in app.bot.sent[0][1]
+        assert app.in_chat(msg("x")) and not app.in_chat(msg("x", chat_id=1))
+
+        await cmd["cost"](msg("/cost шуба 9к"), args("шуба 9к"))
+        it = db.items(1)[0]
+        assert (it["product"], it["known"], it["cost"], it["dane"]) == ("Шуба", 1, 9000, 5500)
+        assert "Пересчитал заказов: 1" in replies[-1] and "нет себестоимости" not in app.bot.edited[-1]
+
+        await cmd["cost"](msg("/cost Шуба 10000 Л"), args("Шуба 10000 Л"))   # размер кириллицей
+        assert db.items(1)[0]["cost"] == 10000
+
+        await cmd["outer"](msg("/outer шуба"), args("шуба"))
+        assert db.size_matrix() == {"Шуба": {"L": 1}}
+
+        db.set_dane_paid(1, True)                       # отданные Дане заказы больше не пересчитываются
+        await cmd["cost"](msg("/cost шуба 1"), args("шуба 1"))
+        assert db.items(1)[0]["cost"] == 10000
+        assert "Шуба — 1" in app.catalog_text()
+
+    asyncio.run(run())
