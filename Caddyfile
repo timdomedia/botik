@@ -1,0 +1,8 @@
+# Используется, только если в .env стоит COMPOSE_PROFILES=caddy.
+# Caddy сам получает сертификат Let's Encrypt для DOMAIN и пускает внутрь только /tilda.
+{$DOMAIN} {
+	handle /tilda* {
+		reverse_proxy bot:{$BOT_PORT}
+	}
+	respond 404
+}

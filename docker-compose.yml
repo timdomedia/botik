@@ -4,9 +4,28 @@ services:
     restart: unless-stopped
     env_file: .env
     ports:
-      # только для nginx на этом же сервере; наружу порт не торчит
-      - "127.0.0.1:${PORT:-8080}:${PORT:-8080}"
+      # по умолчанию только для nginx на этом же сервере; BIND=0.0.0.0 — если /tilda пересылает другой сервер
+      - "${BIND:-127.0.0.1}:${PORT:-8080}:${PORT:-8080}"
     volumes:
       - ./data:/app/data
       - ./products.yaml:/app/products.yaml:ro
       - ./service_account.json:/app/service_account.json:ro
+
+  # https без своего nginx: включается COMPOSE_PROFILES=caddy в .env (install.sh делает это сам)
+  caddy:
+    image: caddy:2
+    profiles: ["caddy"]
+    restart: unless-stopped
+    depends_on: [bot]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${PUBLIC_DOMAIN:-localhost}
+      BOT_PORT: ${PORT:-8080}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+
+volumes:
+  caddy_data:
