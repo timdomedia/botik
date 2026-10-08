@@ -4,7 +4,8 @@ services:
     restart: unless-stopped
     env_file: .env
     ports:
-      - "8080:8080"
+      # только для nginx на этом же сервере; наружу порт не торчит
+      - "127.0.0.1:${PORT:-8080}:${PORT:-8080}"
     volumes:
       - ./data:/app/data
       - ./products.yaml:/app/products.yaml:ro

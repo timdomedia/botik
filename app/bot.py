@@ -54,7 +54,7 @@ class App:
             log.info("duplicate order %s ignored", order.order_id)
             return False
         pk = self.db.save_order(order, self.catalog, self.settings.acquiring_percent,
-                                self.settings.dane_share_percent)
+                                self.settings.dane_share_percent, self.settings.tax_percent)
         await self.post_order(pk)
         await self.sheets.sync()
         return True

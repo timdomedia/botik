@@ -23,6 +23,7 @@ class Settings:
     port: int
     acquiring_percent: float
     dane_share_percent: float
+    tax_percent: float
     payer_ids: frozenset[int]   # чьи реакции считаются «отдал Дане»; пусто = чьи угодно
     ship_deadline_days: int
     reminder_hour: int | None
@@ -37,11 +38,12 @@ def load_settings() -> Settings:
     reminder = os.getenv("REMINDER_HOUR", "").strip()
     return Settings(
         bot_token=os.environ["BOT_TOKEN"],
-        chat_id=int(os.environ["CHAT_ID"]),
+        chat_id=int(os.getenv("CHAT_ID", "").strip() or 0),  # пусто до первого /chatid
         tilda_token=os.getenv("TILDA_TOKEN", ""),
         port=int(os.getenv("PORT", "8080")),
         acquiring_percent=float(os.getenv("ACQUIRING_PERCENT", "0")),
         dane_share_percent=float(os.getenv("DANE_SHARE_PERCENT", "50")),
+        tax_percent=float(os.getenv("TAX_PERCENT", "0")),
         payer_ids=frozenset(int(x) for x in os.getenv("PAYER_IDS", "").replace(",", " ").split()),
         ship_deadline_days=int(os.getenv("SHIP_DEADLINE_DAYS", "3")),
         reminder_hour=int(reminder) if reminder else None,

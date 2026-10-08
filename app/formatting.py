@@ -58,6 +58,9 @@ def order_card(order, items, debt: float | None = None) -> str:
     fee = sum(it["fee"] for it in items)
     if fee:
         details.append(f"комиссия {money(fee)}")
+    tax = sum(it["tax"] for it in items)
+    if tax:
+        details.append(f"налог {money(tax)}")
     details.append(f"прибыль {money(sum(it['brand_profit'] for it in items))}")
     details.append(f"мне {money(sum(it['profit'] for it in items))}")
     parts.append(f"<i>{' · '.join(details)}</i>")
@@ -76,7 +79,7 @@ def totals_text(t: Totals) -> str:
         "📊 <b>Сводка</b>",
         f"Заказов: {t.orders}  (✅ {t.shipped} · ⏳ {t.not_shipped} · ❌ {t.cancelled})",
         f"Выручка: {money(t.revenue)} ₽",
-        f"Себестоимость: {money(t.cost)} ₽ · Эквайринг: {money(t.fee)} ₽",
+        f"Себестоимость: {money(t.cost)} ₽ · Комиссии: {money(t.fee)} ₽ · Налог: {money(t.tax)} ₽",
         f"📈 <b>Прибыль бренда: {money(t.brand_profit)} ₽</b>",
         f"💰 Моя доля: {money(t.profit)} ₽",
         f"💸 Доля Дани: {money(t.dane)} ₽, отдано {money(t.paid_to_dane)} ₽",

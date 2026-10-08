@@ -141,7 +141,7 @@ def test_reaction_marks_dane_paid(tmp_path):
         async def edit_message_text(self, text, **kw):
             self.sent.append(text)
 
-    settings = types.SimpleNamespace(chat_id=1, acquiring_percent=0, dane_share_percent=50,
+    settings = types.SimpleNamespace(chat_id=1, acquiring_percent=0, dane_share_percent=50, tax_percent=0,
                                      ship_deadline_days=3, payer_ids=frozenset({42}))
     db = DB(str(tmp_path / "t.db"))
     app = App(FakeBot(), db, Catalog([]), Sheets("", "", db, Catalog([]), 3), settings)
@@ -161,3 +161,14 @@ def test_reaction_marks_dane_paid(tmp_path):
         assert db.totals().dane_debt == 500 and "#1" in app.dolg_text()
 
     asyncio.run(run())
+
+
+def test_tax(tmp_path):
+    p = tmp_path / "products.yaml"
+    p.write_text(PAY_CATALOG, encoding="utf-8")
+    db = DB(str(tmp_path / "t.db"))
+    pk = db.save_order(parse({"paymentsystem": "cash", "payment": {"orderid": "x", "products": [
+        {"name": "Шуба", "amount": 20000}]}}), Catalog.load(str(p)), 3.5, tax_percent=6)
+    it = db.items(pk)[0]
+    assert it["fee"] == 0 and it["tax"] == 1200 and it["brand_profit"] == 20000 - 1200 - 9000
+    assert "налог 1 200" in order_card(db.order(pk), [it]) and db.totals().tax == 1200

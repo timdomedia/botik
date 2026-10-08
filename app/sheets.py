@@ -60,10 +60,10 @@ class Sheets:
 
     def _orders(self) -> list[list]:
         rows = [["Дата", "Заказ", "Оплата", "Клиент", "Товар", "Размер", "Кол-во", "Выручка", "Комиссия",
-                 "Себестоимость", "Прибыль бренда", "Дане", "Мне", "Дане отдано", "Статус", "Трек", "Отправлен"]]
+                 "Налог", "Себестоимость", "Прибыль бренда", "Дане", "Мне", "Дане отдано", "Статус", "Трек", "Отправлен"]]
         for it in self.db.all_items():
             rows.append([it["created_at"], it["order_id"], it["payment"], it["client"], it["product"], it["size"],
-                         it["qty"], it["revenue"], it["fee"], it["cost"], it["brand_profit"], it["dane"], it["profit"],
+                         it["qty"], it["revenue"], it["fee"], it["tax"], it["cost"], it["brand_profit"], it["dane"], it["profit"],
                          it["dane_paid_at"] or "❌ нет", STATUS.get(it["status"], it["status"]),
                          it["track"], it["shipped_at"]])
         return rows
@@ -111,7 +111,8 @@ class Sheets:
             ["⏳ Не отправлено", t.not_shipped],
             ["❌ Отменено", t.cancelled],
             ["Выручка", t.revenue],
-            ["Эквайринг", t.fee],
+            ["Комиссии", t.fee],
+            ["Налог", t.tax],
             ["Себестоимость", t.cost],
             ["Прибыль бренда", t.brand_profit],
             ["Доля Дани начислено", t.dane],

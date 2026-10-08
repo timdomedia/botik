@@ -37,29 +37,63 @@
 | `/reload` | перечитать `products.yaml` |
 | `/chatid` | показать id чата и твой id (для настройки) |
 
-## Настройка
+## Установка на VPS (Aeza, рядом с tg-finance)
 
-1. **Бот.** Создай бота в @BotFather, добавь его в чат с Даней и **сделай администратором**:
-   без этого Telegram не присылает боту реакции. В BotFather отключи *Group Privacy*
-   (`/setprivacy` → Disable), чтобы бот видел ответы с треками.
-   Напиши в чате `/chatid` и запиши оба числа: id чата и свой id.
-2. **Конфиг.** `cp .env.example .env` и заполни `BOT_TOKEN`, `CHAT_ID`, `TILDA_TOKEN`
-   (доля Дани задаётся в `DANE_SHARE_PERCENT`, по умолчанию 50). В `PAYER_IDS` впиши свой id,
-   чтобы «отдал Дане» засчитывались только твои реакции, а не Данины.
-3. **Каталог.** `cp products.example.yaml products.yaml`. Для каждого товара укажи, как он
-   называется в Тильде (`match`), себестоимость (`cost`), является ли он верхней одеждой
-   (`outerwear`) и, по желанию, стартовые остатки (`stock`). Там же настраиваются комиссии
-   способов оплаты (`payments`).
-4. **Google-таблица** (по желанию):
-   - в Google Cloud создай сервисный аккаунт, включи *Google Sheets API*, скачай JSON-ключ как `service_account.json`;
-   - создай пустую таблицу и выдай доступ «Редактор» email-у сервисного аккаунта;
-   - id таблицы (кусок URL между `/d/` и `/edit`) запиши в `GOOGLE_SHEET_ID`.
-5. **Запуск:** `docker compose up -d --build`, либо `pip install -r requirements.txt && python -m app.main`.
-6. **Тильда.** В «Настройки сайта → Формы → Webhook» добавь URL
-   `https://<твой-домен>/tilda?token=<TILDA_TOKEN>` и подключи его к форме корзины.
-   Если включена онлайн-оплата, выбери отправку данных **после успешной оплаты**.
-   Тильда шлёт тестовый запрос, на который бот отвечает `ok`. Нужен HTTPS, поэтому порт 8080
-   поставь за nginx/Caddy или используй туннель (Cloudflare Tunnel и т.п.).
+### 1. Бот `@splitfinance_bot`
+1. В @BotFather: `/mybots` → `@splitfinance_bot` → **API Token** → скопируй токен.
+   Если хочешь новое имя в чате: `Edit Bot` → `Edit Name`.
+2. **Останови старый проект, который работает на этом токене.** Двое на одном боте не уживутся:
+   Telegram отдаёт сообщения только кому-то одному. Найти его на сервере можно так:
+   `docker ps`, `pm2 ls` или `systemctl list-units --type=service | grep -i bot`.
+   Вебхук старого проекта новый бот снимает сам при запуске.
+3. В @BotFather: `Bot Settings` → `Group Privacy` → **Turn off**, чтобы бот видел ответы с треками.
+4. Добавь бота в чат с Даней и **сделай администратором**: без этого Telegram не присылает
+   боту реакции. Права можно снять все, нужен сам статус админа.
+
+### 2. Код и настройки на сервере
+```bash
+ssh root@<ip-сервера>
+cd /opt && git clone https://github.com/timdomedia/botik.git && cd botik
+git checkout claude/tilda-telegram-orders-bot-iplflz   # пока ветка не слита в main
+cp .env.example .env && nano .env              # BOT_TOKEN, TILDA_TOKEN; PORT, если 8080 занят
+cp products.example.yaml products.yaml && nano products.yaml   # товары и себестоимость
+touch service_account.json                     # пустышка, если Google-таблица пока не нужна
+docker compose up -d --build
+docker compose logs -f                          # должно быть «tilda webhook listening»
+```
+Docker на сервере уже должен быть, раз на нём крутится tg-finance. Если нет: `curl -fsSL https://get.docker.com | sh`.
+
+Потом напиши в чате `/chatid`. Бот ответит id чата и твоим id. Впиши их в `.env`
+(`CHAT_ID` и `PAYER_IDS`) и перезапусти: `docker compose up -d`.
+
+### 3. Адрес для Тильды через nginx
+Порт бота открыт только внутри сервера (`127.0.0.1:8080`). Наружу его выводит nginx,
+который уже обслуживает tg-finance. В конфиг его домена (`/etc/nginx/sites-enabled/...`),
+внутрь блока `server { ... }` с `listen 443`, добавь:
+```nginx
+location /tilda {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_set_header Host $host;
+}
+```
+Затем `nginx -t && systemctl reload nginx`. Проверка: `curl https://<домен>/tilda` должен
+ответить `405`, а не `404`.
+
+В Тильде: «Настройки сайта → Формы → Webhook» → `https://<домен>/tilda?token=<TILDA_TOKEN>`,
+подключи к форме корзины. Если включена онлайн-оплата, выбери отправку **после успешной оплаты**.
+Если tg-finance уже получает заказы с Тильды, его вебхук не трогай: у формы может быть несколько вебхуков.
+
+### 4. Google-таблица (по желанию)
+- в Google Cloud создай сервисный аккаунт, включи *Google Sheets API*, скачай JSON-ключ
+  и положи на сервер как `/opt/botik/service_account.json`;
+- создай пустую таблицу и выдай доступ «Редактор» email-у сервисного аккаунта;
+- id таблицы (кусок URL между `/d/` и `/edit`) запиши в `GOOGLE_SHEET_ID`, затем `docker compose up -d`.
+
+### Обновление
+```bash
+cd /opt/botik && git pull && docker compose up -d --build
+```
+База лежит в `/opt/botik/data/orders.db` и при обновлении не трогается.
 
 ## Как считается
 
@@ -70,7 +104,8 @@
 комиссия       = выручка × % способа оплаты (долями 7, СБП 0.7, карта 3.5 — правится в products.yaml;
                  нераспознанный способ: ACQUIRING_PERCENT)
 себестоимость  = cost (для размера или default) × кол-во
-прибыль бренда = выручка − комиссия − себестоимость
+налог          = выручка × TAX_PERCENT % (по умолчанию 0, для УСН 6% поставь 6)
+прибыль бренда = выручка − комиссия − налог − себестоимость
 Дане           = прибыль бренда × DANE_SHARE_PERCENT % (по умолчанию 50%)
 мне            = прибыль бренда − Дане
 ```

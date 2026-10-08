@@ -32,9 +32,10 @@ CREATE TABLE IF NOT EXISTS items (
     options TEXT DEFAULT '',
     qty INTEGER NOT NULL,
     revenue REAL NOT NULL,      -- после скидки, без доставки
-    fee REAL NOT NULL,          -- эквайринг
+    fee REAL NOT NULL,          -- комиссия способа оплаты
+    tax REAL NOT NULL DEFAULT 0, -- налог с выручки
     cost REAL NOT NULL,         -- себестоимость
-    brand_profit REAL NOT NULL, -- прибыль бренда = выручка − эквайринг − себестоимость
+    brand_profit REAL NOT NULL, -- прибыль бренда = выручка − комиссия − налог − себестоимость
     dane REAL NOT NULL,         -- доля Дани (DANE_SHARE_PERCENT от прибыли бренда)
     profit REAL NOT NULL        -- моя доля
 );
@@ -50,6 +51,7 @@ class Totals:
     orders: int
     revenue: float
     fee: float
+    tax: float
     cost: float
     brand_profit: float
     dane: float
@@ -77,13 +79,15 @@ class DB:
         for column, ddl in (("payment", "TEXT DEFAULT ''"), ("dane_paid_at", "TEXT DEFAULT ''")):
             if column not in have:
                 self.conn.execute(f"ALTER TABLE orders ADD COLUMN {column} {ddl}")
+        if "tax" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(items)")}:
+            self.conn.execute("ALTER TABLE items ADD COLUMN tax REAL NOT NULL DEFAULT 0")
         self.conn.commit()
 
     def exists(self, order_id: str) -> bool:
         return self.conn.execute("SELECT 1 FROM orders WHERE order_id=?", (order_id,)).fetchone() is not None
 
     def save_order(self, order: Order, catalog: Catalog, acquiring_percent: float,
-                   dane_share_percent: float = 50) -> int:
+                   dane_share_percent: float = 50, tax_percent: float = 0) -> int:
         """Сохраняет заказ и считает деньги по каждой позиции. Возвращает pk заказа.
 
         Комиссия берётся по способу оплаты (долями, СБП, перевод…), если он распознан,
@@ -108,16 +112,17 @@ class DB:
                 revenue = round(item.amount - discount_share, 2)
                 fee = round(revenue * fee_percent / 100, 2)
                 cost = product.cost_for(item.size) * item.qty if product else 0
-                brand_profit = round(revenue - fee - cost, 2)
+                tax = round(revenue * tax_percent / 100, 2)
+                brand_profit = round(revenue - fee - tax - cost, 2)
                 dane = round(brand_profit * dane_share_percent / 100, 2)
                 profit = round(brand_profit - dane, 2)
                 self.conn.execute(
                     """INSERT INTO items (order_pk, product, raw_name, known, outerwear, size, options,
-                       qty, revenue, fee, cost, brand_profit, dane, profit)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       qty, revenue, fee, tax, cost, brand_profit, dane, profit)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (pk, product.name if product else item.name, item.name, int(bool(product)),
                      int(bool(product and product.outerwear)), item.size, item.options, item.qty,
-                     revenue, fee, cost, brand_profit, dane, profit),
+                     revenue, fee, tax, cost, brand_profit, dane, profit),
                 )
         return pk
 
@@ -193,7 +198,8 @@ class DB:
     def totals(self) -> Totals:
         money = self.conn.execute(
             """SELECT COUNT(DISTINCT o.id) AS orders, COALESCE(SUM(i.revenue),0) AS revenue,
-                      COALESCE(SUM(i.fee),0) AS fee, COALESCE(SUM(i.dane),0) AS dane,
+                      COALESCE(SUM(i.fee),0) AS fee, COALESCE(SUM(i.tax),0) AS tax,
+                      COALESCE(SUM(i.dane),0) AS dane,
                       COALESCE(SUM(i.cost),0) AS cost, COALESCE(SUM(i.brand_profit),0) AS brand_profit,
                       COALESCE(SUM(i.profit),0) AS profit
                FROM orders o LEFT JOIN items i ON i.order_pk = o.id WHERE o.status != 'cancelled'"""
@@ -204,7 +210,7 @@ class DB:
             """SELECT COALESCE(SUM(i.dane),0) FROM orders o JOIN items i ON i.order_pk = o.id
                WHERE o.status != 'cancelled' AND o.dane_paid_at != ''""").fetchone()[0]
         return Totals(
-            orders=money["orders"], revenue=money["revenue"], fee=money["fee"], dane=money["dane"],
+            orders=money["orders"], revenue=money["revenue"], fee=money["fee"], tax=money["tax"], dane=money["dane"],
             cost=money["cost"], brand_profit=money["brand_profit"], profit=money["profit"], paid_to_dane=paid,
             shipped=status.get("shipped", 0), not_shipped=status.get("new", 0),
             cancelled=status.get("cancelled", 0),
