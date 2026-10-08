@@ -172,3 +172,33 @@ def test_tax(tmp_path):
     it = db.items(pk)[0]
     assert it["fee"] == 0 and it["tax"] == 1200 and it["brand_profit"] == 20000 - 1200 - 9000
     assert "налог 1 200" in order_card(db.order(pk), [it]) and db.totals().tax == 1200
+
+
+def test_prepare_bot_cleans_old_project():
+    import asyncio
+    import types
+
+    from app.setup_bot import COMMANDS, DESCRIPTION, prepare_bot
+
+    calls = []
+
+    class FakeBot:
+        def __getattr__(self, name):
+            async def method(**kw):
+                calls.append((name, kw))
+                return {
+                    "get_webhook_info": types.SimpleNamespace(url="https://gulf-split.vercel.app/api/bot"),
+                    "get_my_description": types.SimpleNamespace(description="GULF SPLIT"),
+                    "get_my_short_description": types.SimpleNamespace(short_description=""),
+                    "get_my_name": types.SimpleNamespace(name="splitfinance"),
+                }.get(name, True)
+            return method
+
+    asyncio.run(prepare_bot(FakeBot(), name="Заказы"))
+    names = [c[0] for c in calls]
+    assert ("delete_webhook", {"drop_pending_updates": True}) in calls
+    assert names.count("delete_my_commands") == 12
+    assert len(next(kw for n, kw in calls if n == "set_my_commands")["commands"]) == len(COMMANDS)
+    assert next(kw for n, kw in calls if n == "set_chat_menu_button")["menu_button"].type == "commands"
+    assert ("set_my_description", {"description": DESCRIPTION}) in calls
+    assert ("set_my_name", {"name": "Заказы"}) in calls

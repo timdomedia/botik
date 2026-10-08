@@ -18,6 +18,7 @@ def _load_dotenv(path: str = ".env") -> None:
 @dataclass(frozen=True)
 class Settings:
     bot_token: str
+    bot_name: str
     chat_id: int
     tilda_token: str
     port: int
@@ -38,6 +39,7 @@ def load_settings() -> Settings:
     reminder = os.getenv("REMINDER_HOUR", "").strip()
     return Settings(
         bot_token=os.environ["BOT_TOKEN"],
+        bot_name=os.getenv("BOT_NAME", "").strip(),
         chat_id=int(os.getenv("CHAT_ID", "").strip() or 0),  # пусто до первого /chatid
         tilda_token=os.getenv("TILDA_TOKEN", ""),
         port=int(os.getenv("PORT", "8080")),

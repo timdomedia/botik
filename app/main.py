@@ -5,26 +5,15 @@ from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import BotCommand
 from aiohttp import web
 
 from .bot import App, build_router
 from .catalog import Catalog
 from .config import load_settings
 from .db import DB
+from .setup_bot import prepare_bot
 from .sheets import Sheets
 from .web import build_web
-
-
-COMMANDS = [
-    ("pending", "не отправленные заказы"),
-    ("dolg", "за какие заказы не отдал Дане"),
-    ("stats", "выручка, прибыль, долг Дане"),
-    ("sizes", "верхняя одежда по размерам"),
-    ("ship", "отметить заказ отправленным"),
-    ("sync", "обновить таблицу"),
-    ("help", "что умеет бот"),
-]
 
 
 async def reminder_loop(app: App) -> None:
@@ -61,9 +50,8 @@ async def main() -> None:
     if settings.reminder_hour is not None:
         asyncio.create_task(reminder_loop(app))
     asyncio.create_task(sheets.sync())
-    # Бот мог раньше работать через вебхук (старый проект) — тогда polling не получит апдейты.
-    await bot.delete_webhook(drop_pending_updates=False)
-    await bot.set_my_commands([BotCommand(command=c, description=d) for c, d in COMMANDS])
+    # на токене раньше жил другой проект: снимаем его вебхук, команды, мини-апп, описание
+    await prepare_bot(bot, settings.bot_name)
     # message_reaction приходит, только если явно запросить и бот — админ чата
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
